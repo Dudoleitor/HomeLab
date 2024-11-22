@@ -1,0 +1,77 @@
+# This Policy ensures that the pod can access only the resources it's meant to
+# and is hit by traffic coming from the reverse proxy only
+apiVersion: projectcalico.org/v3
+kind: NetworkPolicy
+metadata:
+  name: grafana
+  namespace: monitoring
+spec:
+  selector: app == 'grafana'
+  ingress:
+  - source:  # Allowing connections from the reverse proxy
+      selector: app.kubernetes.io/name == 'traefik'
+      namespaceSelector: kubernetes.io/metadata.name == 'kube-system'
+    destination:
+      ports:
+      - grafana-ui
+    protocol: TCP
+    action: Allow
+  egress:
+  - destination:
+      selector: app == 'prometheus-server'
+      namespaceSelector: kubernetes.io/metadata.name == 'monitoring'
+      ports:
+      - 9090
+    protocol: TCP
+    action: Allow
+  - destination:
+      nets:
+      - 1.2.3.4/32  # prometheus
+      ports:
+      - 9090
+    protocol: TCP
+    action: Allow
+  - destination:
+      nets:
+      - 1.2.3.4/32  # prometheus
+      ports:
+      - 9090
+    protocol: TCP
+    action: Allow
+  - destination:  # Blocking connections to LAN
+      selector: lan-blacklist == 'true'
+    action: Deny
+  - destination:  # Allowing connections to the internet
+      ports:
+      - 80
+      - 443
+    protocol: TCP
+    action: Allow
+  - destination:
+      nets:
+      - 1.2.3.4/32  # smtp relay
+      ports:
+      - 587  # smtp with starttls
+    protocol: TCP
+    action: Allow
+  - destination:
+      nets:
+      - 1:2:3:4::5/128  # smtp relay
+      ports:
+      - 587  # smtp with starttls
+    protocol: TCP
+    action: Allow
+  - destination:  # Allowing connections to the dns resolver
+      selector: k8s-app == 'kube-dns'
+      namespaceSelector: kubernetes.io/metadata.name == 'kube-system'
+      ports:
+      - 53
+    protocol: UDP
+    action: Allow
+  - destination:  # Allowing connections to the dns resolver
+      selector: k8s-app == 'kube-dns'
+      namespaceSelector: kubernetes.io/metadata.name == 'kube-system'
+      ports:
+      - 53
+    protocol: TCP
+    action: Allow

@@ -1,0 +1,23 @@
+server default {
+  listen {
+    type = auth
+    ipaddr = *
+    port = 1812
+    limit {
+      max_connections = 16
+      lifetime = 0
+      idle_timeout = 30
+  }
+
+  authorize {
+    filter_username
+    preprocess
+    ldap
+  }
+
+  authenticate {
+    Auth-Type LDAP {
+      ldap
+    }
+  }
+}

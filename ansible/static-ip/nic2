@@ -1,0 +1,9 @@
+# This files describes a secondary network interface.
+
+auto {{ nic2_name }}
+allow-hotplug {{ nic2_name }}
+iface {{ nic2_name }} inet static
+    address {{ nic2_ip }}/{{ nic2_netmask }}
+{% if nic2_ipv6_token is defined and (not (disable_ipv6 is defined) or not disable_ipv6) %}
+    pre-up /sbin/ip token set {{ nic2_ipv6_token }} dev {{ nic2_name }}
+{% endif %}

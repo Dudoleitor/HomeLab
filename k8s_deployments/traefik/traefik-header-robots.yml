@@ -1,0 +1,30 @@
+# These middleware sets an http header to discourage robots
+# from indexing the site.
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: robotsin
+  namespace: default
+  labels:
+    traffic-type: internal
+  annotations:
+    kubernetes.io/ingress.class: traefik-internal
+spec:
+  headers:
+    customResponseHeaders:
+      X-Robots-Tag: "noindex, nofollow"
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: robotsext
+  namespace: default
+  labels:
+    traffic-type: external  # To be detected by the external proxy
+  annotations:
+    kubernetes.io/ingress.class: traefik-external
+spec:
+  headers:
+    customResponseHeaders:
+      X-Robots-Tag: "noindex, nofollow"

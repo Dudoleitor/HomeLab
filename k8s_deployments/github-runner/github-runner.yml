@@ -1,0 +1,58 @@
+# kubectl create namespace actions-runner-system
+# kubectl create secret generic controller-manager \
+#     -n actions-runner-system \
+#     --from-literal=github_token=REPLACE_YOUR_TOKEN_HERE
+
+# helm repo add actions-runner-controller https://actions-runner-controller.github.io/actions-runner-controller
+# helm upgrade --install --namespace actions-runner-system --create-namespace\
+#    --set=authSecret.create=false actions-runner-controller/actions-runner-controller
+
+apiVersion: actions.summerwind.dev/v1alpha1
+kind: RunnerSet
+metadata:
+  name: ids-github-runner
+  namespace: github-runner
+spec:
+  replicas: 1
+  repository: Dudoleitor/My-Shelfie
+  ephemeral: false
+  labels:
+    - 'jdk11-mvn'
+  selector:
+    matchLabels:
+      app: github-runner
+      instance: ids
+  serviceName: github-runner
+  template:
+    metadata:
+      labels:
+        app: github-runner
+        instance: ids
+    spec:
+      containers:
+      - name: runner
+        image: internal-repo.local.dudoleitor.com:5000/gh-runner-jdk11:latest
+        resources:
+          limits:
+            cpu: 500m
+            memory: 256Mi
+          requests:
+            cpu: 250m
+            memory: 128Mi
+        securityContext:
+          privileged: false
+          allowPrivilegeEscalation: false
+          runAsUser: 1000
+          runAsGroup: 1000
+          capabilities:
+            drop:
+            - ALL
+      - name: docker
+        image: docker:dind-rootless
+        resources:
+          limits:
+            cpu: 250m
+            memory: "256Mi"
+          requests:
+            cpu: 100m
+            memory: 128Mi

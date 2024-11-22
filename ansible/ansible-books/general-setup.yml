@@ -1,0 +1,116 @@
+- hosts: --redacted--
+  become: yes
+  gather_facts: no
+  tasks:
+  - name: Update packages
+    apt:
+      update_cache: yes
+      force_apt_get: yes
+  - name: Install vim
+    apt:
+      name: vim
+      state: present
+
+  - name: Set ansible ssh key
+    copy:
+      src: '/home/dudoleitor/ansible/ansible-mk2.pub'
+      dest: '/home/ansible-admin/.ssh/authorized_keys'
+      force: yes
+      mode: 0400
+      owner: ansible-admin
+      group: ansible-admin
+
+  - name: Create .ssh folder
+    file:
+      path: "/home/edoardo/.ssh"
+      state: directory
+      mode: 0700
+      owner: edoardo
+      group: edoardo
+
+  - name: Set edoardo ssh key
+    get_url:
+      dest: /home/edoardo/.ssh/authorized_keys
+      mode: 0400
+      owner: edoardo
+      group: edoardo
+      force: yes
+      url: "https://www.dudoleitor.com/edoardo-mk2.pub"
+
+  - name: Enable passwordless sudo for edoardo if needed
+    lineinfile:
+      dest: /etc/sudoers.d/edoardo
+      line: "edoardo    ALL=(root) NOPASSWD:ALL"
+      create: yes
+    when: passwordless_sudo is defined and passwordless_sudo
+
+  - name: Disable SSH password auth
+    lineinfile:
+      dest: /etc/ssh/sshd_config
+      regexp: "PasswordAuthentication"
+      line: "PasswordAuthentication no"
+    register: sshd_config
+  - name: Restart sshd if needed
+    service:
+      name: sshd
+      state: restarted
+    when: sshd_config.changed
+
+  - name: Disable IPv6 if needed
+    lineinfile:
+      dest: '/etc/sysctl.conf'
+      line: '{{ item }}'
+    loop: ['net.ipv6.conf.all.disable_ipv6 = 1',
+      'net.ipv6.conf.default.disable_ipv6 = 1',
+      'net.ipv6.conf.lo.disable_ipv6 = 1']
+    register: sysctl
+    when: disable_ipv6 is defined and disable_ipv6
+  - name: Reload sysctl if needed
+    shell: 'sysctl -p'
+    when: sysctl.changed
+
+  - name: Install CA
+    ansible.builtin.copy:
+      src: /home/dudoleitor/ansible/Dudoleitor-Root-CA.crt
+      dest: /usr/local/share/ca-certificates/Dudoleitor-Root-CA.crt
+      force: yes
+    register: ca_folder
+  - name: Refresh certificates store if needed
+    command: /usr/sbin/update-ca-certificates
+    when: ca_folder.changed
+    register: update_ca
+    changed_when: '"0 added, 0 removed;" not in update_ca.stdout'
+
+  - name: Set Timezone
+    timezone:
+      name: Europe/Rome
+  
+  - name: Install unattended-upgrades if enabled
+    apt:
+      name: unattended-upgrades
+      state: present
+    when: auto_updates is defined and auto_updates
+    register: unattended_upgrades
+  - name: Configure unattended-upgrades if needed
+    ansible.builtin.copy:
+      src: /home/dudoleitor/ansible/unattended-upgrades.conf
+      dest: /etc/apt/apt.conf.d/50unattended-upgrades
+      owner: root
+      group: root
+      mode: 0644
+    when: auto_updates is defined and auto_updates
+    register: unattended_config
+  - name: Enable unattended-upgrades if needed
+    ansible.builtin.copy:
+      src: /home/dudoleitor/ansible/unattended-upgrades-periodic.conf
+      dest: /etc/apt/apt.conf.d/02periodic
+      owner: root
+      group: root
+      mode: 0644
+    when: auto_updates is defined and auto_updates
+    register: unattended_periodic_config
+  - name: Restart unattended-upgrades if needed
+    service:
+      name: unattended-upgrades
+      state: restarted
+    when: unattended_upgrades.changed or unattended_config.changed or unattended_periodic_config.changed

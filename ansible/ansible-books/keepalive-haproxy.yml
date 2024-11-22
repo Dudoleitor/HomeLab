@@ -1,0 +1,99 @@
+---
+- hosts: --redacted--
+  become: true
+  gather_facts: no
+
+  tasks:
+  - name: Install keepalived and haproxy
+    apt: name={{ item }} state=latest update_cache=yes
+    loop: [ 'curl', 'haproxy', 'keepalived' ]
+
+  - name: Enable services
+    service: name={{ item }} enabled=yes state=started
+    loop: [ 'haproxy', 'keepalived' ]
+
+  - name: Create keepalived user for scripts execution
+    shell: 'useradd -r keepalived_script'
+    register: user_add
+    failed_when: user_add.rc != 9 and user_add.rc != 0
+    changed_when: user_add.rc == 0
+
+  - name: Copy keepalived check file
+    copy:
+      src: '/home/dudoleitor/ansible/kubernetes-masters/check_apiserver.sh'
+      dest: '/etc/keepalived/check_apiserver.sh'
+      force: yes
+  - name: Setting permissions to the file
+    file: dest='/etc/keepalived/check_apiserver.sh' mode=+x
+
+  - name: Copy keepalived config file temporarily
+    copy:
+      src: '/home/dudoleitor/ansible/kubernetes-masters/keepalived.conf'
+      dest: '/etc/keepalived/keepalived.conf.temp'
+      force: yes
+    changed_when: False
+  - name: Insert vrrp password into keepalived config file
+    replace:
+      path: '/etc/keepalived/keepalived.conf.temp'
+      regexp: 'VRRP_PASSWD_PLACEHOLDER'
+      replace: '{{ vrrp_password }}'
+    changed_when: False
+
+  - name: Copy haproxy config file
+    copy:
+      src: '/home/dudoleitor/ansible/kubernetes-masters/haproxy.cfg'
+      dest: '/etc/haproxy/haproxy.cfg'
+      force: yes
+    register: haproxy_config
+ 
+  - name: Restart haproxy if needed
+    service:
+      name: haproxy
+      state: restarted
+    when: haproxy_config.changed
+
+- hosts: --redacted--
+  become: true
+  gather_facts: no
+
+  tasks:
+  - name: Update keepalived config to lower priority
+    replace:
+      path: '/etc/keepalived/keepalived.conf.temp'
+      regexp: "priority 100"
+      replace: "priority 99"
+    changed_when: False
+
+- hosts: debian-mysql
+  become: true
+  gather_facts: no
+
+  tasks:
+  - name: Copy keepalived config
+    copy:
+      src: '/etc/keepalived/keepalived.conf.temp'
+      dest: '/etc/keepalived/keepalived.conf'
+      force: yes
+      remote_src: yes
+    register: keepalived_config
+  - name: Temporary config cleanup
+    file:
+      path: '/etc/keepalived/keepalived.conf.temp'
+      state: absent
+    changed_when: False
+
+  - name: Restart keepalived if needed
+    service:
+      name: keepalived
+      state: restarted
+    when: keepalived_config.changed
+
+  - name: Create mysql user haproxy
+    mysql_user:
+      name: haproxy
+      host: "{{ item }}"
+      login_unix_socket: "/var/run/mysqld/mysqld.sock"
+    with_items:
+    - 10.40.10.21
+    - 10.40.10.22
+    run_once: yes

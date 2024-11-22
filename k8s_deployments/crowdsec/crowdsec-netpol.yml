@@ -1,0 +1,57 @@
+# This Policy ensures that the pod can only reach the internet
+# and is not hit by any traffic
+apiVersion: projectcalico.org/v3
+kind: NetworkPolicy
+metadata:
+  name: crowdsec-namespace
+  namespace: crowdsec
+spec:
+  ingress:
+  - source:  # Allowing connections from pods within the namespace
+      namespaceSelector: kubernetes.io/metadata.name == 'crowdsec'
+    action: Allow
+  - source:  # Allowing connections from traefik to the bouncer
+      selector: app.kubernetes.io/name == 'traefik'
+      namespaceSelector: kubernetes.io/metadata.name == 'kube-system'
+    destination:
+      selector: app == 'crowdsec-tr-bouncer'
+      ports:
+      - http
+    protocol: TCP
+    action: Allow
+  - source:  # Allowing connections from traefik to modsecurity
+      selector: app.kubernetes.io/name == 'traefik'
+      namespaceSelector: kubernetes.io/metadata.name == 'kube-system'
+    destination:
+      selector: app == 'modsecurity'
+      ports:
+      - waf
+    protocol: TCP
+    action: Allow
+  egress:
+  - destination:  # Allowing connections to the dns resolver
+      selector: k8s-app == 'kube-dns'
+      namespaceSelector: kubernetes.io/metadata.name == 'kube-system'
+      ports:
+      - 53
+    protocol: UDP
+    action: Allow
+  - destination:  # Allowing connections to the dns resolver
+      selector: k8s-app == 'kube-dns'
+      namespaceSelector: kubernetes.io/metadata.name == 'kube-system'
+      ports:
+      - 53
+    protocol: TCP
+    action: Allow
+  - destination:  # Allowing connections to pods within the namespace
+      namespaceSelector: kubernetes.io/metadata.name == 'crowdsec'
+    action: Allow
+  - destination:  # Blocking connections to LAN
+      selector: lan-blacklist == 'true'
+    action: Deny
+  - destination:  # Allowing connections to the internet
+      ports:
+      - 80
+      - 443
+    protocol: TCP
+    action: Allow

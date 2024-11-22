@@ -1,0 +1,424 @@
+# This cronjob will spawn a pod to run background jobs.
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: nextcloud-backgroundjobs
+  namespace: default
+spec:
+  concurrencyPolicy: Forbid
+  schedule: '*/15 * * * *'  # Cron schedule
+  failedJobsHistoryLimit: 1
+  successfulJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 900
+      template:
+        metadata:
+          annotations:
+            sidecar.istio.io/inject: "false"
+          labels:
+            app: php-fpm
+            service: nextcloud-backgroundjobs
+        spec:
+          restartPolicy: Never
+          containers:
+          - name: nextcloud-backgroundjobs
+            image: internal-repo.local.dudoleitor.com:5000/php-fpm-82:v0.0.2
+            imagePullPolicy: IfNotPresent
+            command:  # sleep is needed because of an internal delay related to cronjobs
+              - /bin/sh
+              - -c
+              - /bin/sleep 5 && /usr/local/bin/php /var/www/html/nextcloud/cron.php
+            volumeMounts:
+            - mountPath: /var/www/html
+              name: webroot
+            - mountPath: /usr/local/etc/php/conf.d/logging.ini
+              name: confs
+              subPath: logging.ini
+              readOnly: true
+            - mountPath: /usr/local/etc/php/conf.d/nextcloud.ini
+              name: confs
+              subPath: nextcloud.ini
+              readOnly: true
+            - mountPath: /usr/local/etc/php/conf.d/redis-session.ini
+              name: confs
+              subPath: redis-session.ini
+              readOnly: true
+            - mountPath: /etc/ssl/certs/ca-certificates.crt
+              name: certs-store
+              subPath: ca-certificates.crt
+              readOnly: true
+            - mountPath: /tmp
+              name: cache-tmp
+              subPath: tmp
+            securityContext:
+              privileged: false
+              allowPrivilegeEscalation: false
+              runAsUser: 65200
+              runAsGroup: 65200
+              capabilities:
+                drop:
+                - ALL
+              readOnlyRootFilesystem: true
+            resources:  # Limiting resources is always better, adjust accordingly
+              limits:
+                cpu: 250m
+                memory: 512Mi
+              requests:
+                cpu: 125m
+                memory: 256Mi
+          securityContext:
+            fsGroup: 65200
+            supplementalGroups: [100, 993]  # To access the NFS shares
+            runAsUser: 65200
+            runAsGroup: 65200
+          terminationGracePeriodSeconds: 10
+          volumes:
+          - name: webroot
+            persistentVolumeClaim:
+              claimName: nextcloud-vol  # Needs to be created manually in longhorn
+          - name: confs
+            configMap:
+              name: nextcloud-php
+          - name: certs-store
+            hostPath:
+              path: /etc/ssl/certs
+          - name: cache-tmp
+            emptyDir: {}
+# This deployment manages a pod dedicated to listen for updates in nfs shared folders to add them into nextcloud
+# The custom image was build using the python script from this repo: https://github.com/Blaok/nextcloud-inotifyscan
+# The kernel parameter fs.inotify.max_user_watches needs to be increased (32768 is a good value) on the hosts
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nextcloud-inotify
+  annotations:
+    field.cattle.io/description: inotify implementation for nextcloud
+  namespace: default
+spec:
+  replicas: 1
+  strategy: 
+    type: Recreate
+  revisionHistoryLimit: 0  # Cleaning up all old replicasets
+  selector: 
+    matchLabels: 
+     app: php-fpm
+     service: nextcloud-inotify
+  template:
+    metadata:
+      labels:
+        app: php-fpm
+        service: nextcloud-inotify
+    spec:
+      containers:
+      - image: internal-repo.local.dudoleitor.com:5000/php-inotify-82:v0.0.1
+        imagePullPolicy: IfNotPresent
+        name: php82-inotify
+        volumeMounts:
+        - mountPath: /inotify-config.ini
+          name: inotify-conf
+          subPath: config.ini
+          readOnly: true
+        - mountPath: /var/www/html
+          name: webroot
+        - mountPath: /usr/local/etc/php/conf.d/logging.ini
+          name: confs
+          subPath: logging.ini
+          readOnly: true
+        - mountPath: /usr/local/etc/php/conf.d/nextcloud.ini
+          name: confs
+          subPath: nextcloud.ini
+          readOnly: true
+        - mountPath: /usr/local/etc/php/conf.d/redis-session.ini
+          name: confs
+          subPath: redis-session.ini
+          readOnly: true
+        - mountPath: /etc/ssl/certs/ca-certificates.crt
+          name: certs-store
+          subPath: ca-certificates.crt
+          readOnly: true
+        - mountPath: /dev/urandom  # Needed to improve random numbers generation
+          name: urandom
+          readOnly: true
+        - mountPath: /tmp
+          name: cache-tmp
+          subPath: tmp
+        # We are mounting each user folder separately
+        - mountPath: /var/www/html/nextcloud/data/edoardo/files
+          name: nfs-homes
+          subPath: edoardo
+        - mountPath: /var/www/html/nextcloud/data/edoardo/files_trashbin
+          name: nfs-trash
+          subPath: edoardo
+
+        - mountPath: /mnt/shared-videos
+          name: nfs-videos
+        - mountPath: /mnt/shared-docs
+          name: nfs-docs
+        - mountPath: /mnt/shared-photos
+          name: nfs-photos
+        resources:  # Limiting resources is always better, adjust accordingly
+          limits:
+            cpu: 300m
+            memory: 256Mi
+          requests:
+            cpu: 125m
+            memory: 128Mi
+        securityContext:
+          privileged: false
+          allowPrivilegeEscalation: false
+          runAsUser: 65200
+          runAsGroup: 65200
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+      dnsPolicy: ClusterFirst
+      securityContext:
+        fsGroup: 65200
+        supplementalGroups: [100, 993]  # To access the NFS shares
+        runAsUser: 65200
+        runAsGroup: 65200
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      terminationGracePeriodSeconds: 10
+      volumes:
+      - name: inotify-conf
+        configMap:
+          name: nextcloud-inotify
+      - name: webroot
+        persistentVolumeClaim:
+          claimName: nextcloud-vol  # Needs to be created manually in longhorn
+      - name: confs
+        configMap:
+          name: nextcloud-php
+      - name: certs-store
+        hostPath:
+          path: /etc/ssl/certs
+      - name: urandom
+        hostPath:
+          path: /dev/urandom
+      - name: cache-tmp
+        emptyDir: {}
+
+      # Each user folder will be mounted using subPath
+      - name: nfs-homes
+        nfs:
+          path: /homes
+          server: litecoin-internal.local.dudoleitor.com
+      - name: nfs-trash
+        nfs:
+          path: /k3s-cluster/nextcloud-trash
+          server: litecoin-internal.local.dudoleitor.com
+
+      - name: nfs-videos
+        nfs:
+          path: /videos
+          server: litecoin-internal.local.dudoleitor.com
+      - name: nfs-docs
+        nfs:
+          path: /documents
+          server: litecoin-internal.local.dudoleitor.com
+      - name: nfs-photos
+        nfs:
+          path: /photos
+          server: litecoin-internal.local.dudoleitor.com
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nextcloud-inotify
+  namespace: default
+data:
+  config.ini: |
+    # The DEFAULT section sets global defaults for a nextcloud-inotifyscan daemon.
+    [DEFAULT]
+
+    # interval: seconds until the next polling if no change is found; defaults to 1.
+    interval = 5
+
+    # Each non-DEFAULT section specifies info for a nextcloud instance; name of
+    # sections must be unique; otherwise only the last one will be used.
+    [Instance1]
+
+    # occ: path to the nextcloud occ script; in docker this is typically just "occ".
+    occ = /var/www/html/nextcloud/occ
+
+    # user: the nextcloud users to watch changes for; comma separated.
+    user = administrator, edoardo
+
+    # docker: username:container of the docker, or no.
+    docker = no
+
+    # external_storage: whether to watch external storages. Defaults to no.
+    external_storage = yes
+
+    # php: PHP command to use, defaults to "php"
+    php = php
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nextcloud-foldersrefresh
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: nextcloud-inotify-restart
+  namespace: default
+rules:
+ - apiGroups: ["apps", "extensions"]
+   resources: ["deployments"]
+   verbs: ["get", "patch", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: nextcloud-inotify-restart
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: nextcloud-inotify-restart
+subjects:
+- kind: ServiceAccount
+  name: nextcloud-foldersrefresh
+  namespace: default
+
+# This cronjob will spawn a pod to refresh network folders content
+# and restart the inotify pod
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: nextcloud-foldersrefresh
+  namespace: default
+spec:
+  concurrencyPolicy: Forbid
+  schedule: '30 2 */2 * *'  # Cron schedule
+  failedJobsHistoryLimit: 1
+  successfulJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 7200
+      template:
+        metadata:
+          annotations:
+            sidecar.istio.io/inject: "false"
+          labels:
+            app: php-fpm
+            service: nextcloud-foldersrefresh
+        spec:
+          serviceAccountName: nextcloud-foldersrefresh
+          priorityClassName: lower-priority-2000
+          restartPolicy: Never
+          containers:
+          - name: kubectl
+            image: bitnami/kubectl
+            command:
+              - 'kubectl'
+              - 'rollout'
+              - 'restart'
+              - 'deployment/nextcloud-inotify'
+          - name: nextcloud-foldersrefresh
+            image: internal-repo.local.dudoleitor.com:5000/php-fpm-82:v0.0.2
+            imagePullPolicy: IfNotPresent
+            command:  # sleep is needed because of an internal delay related to cronjobs
+              - /bin/sh
+              - -c
+              - /bin/sleep 5 && /usr/local/bin/php /var/www/html/nextcloud/occ files:scan --all
+            volumeMounts:
+            - mountPath: /var/www/html
+              name: webroot
+            - mountPath: /usr/local/etc/php/conf.d/logging.ini
+              name: confs
+              subPath: logging.ini
+              readOnly: true
+            - mountPath: /usr/local/etc/php/conf.d/nextcloud.ini
+              name: confs
+              subPath: nextcloud.ini
+              readOnly: true
+            - mountPath: /usr/local/etc/php/conf.d/redis-session.ini
+              name: confs
+              subPath: redis-session.ini
+              readOnly: true
+            - mountPath: /etc/ssl/certs/ca-certificates.crt
+              name: certs-store
+              subPath: ca-certificates.crt
+              readOnly: true
+
+            - mountPath: /var/www/html/nextcloud/data/edoardo/files
+              name: nfs-homes
+              subPath: edoardo
+            - mountPath: /var/www/html/nextcloud/data/edoardo/files_trashbin
+              name: nfs-trash
+              subPath: edoardo
+
+            - mountPath: /mnt/shared-videos
+              name: nfs-videos
+            - mountPath: /mnt/shared-docs
+              name: nfs-docs
+            - mountPath: /mnt/shared-photos
+              name: nfs-photos
+            - mountPath: /tmp
+              name: cache-tmp
+              subPath: tmp
+            securityContext:
+              privileged: false
+              allowPrivilegeEscalation: false
+              runAsUser: 65200
+              runAsGroup: 65200
+              capabilities:
+                drop:
+                - ALL
+              readOnlyRootFilesystem: true
+            resources:  # Limiting resources is always better, adjust accordingly
+              limits:
+                cpu: 500m
+                memory: 768Mi
+              requests:
+                cpu: 125m
+                memory: 256Mi
+          securityContext:
+            fsGroup: 65200
+            supplementalGroups: [100, 993]  # To access the NFS shares
+            runAsUser: 65200
+            runAsGroup: 65200
+          terminationGracePeriodSeconds: 10
+          volumes:
+          - name: webroot
+            persistentVolumeClaim:
+              claimName: nextcloud-vol
+          - name: confs
+            configMap:
+              name: nextcloud-php
+          - name: certs-store
+            hostPath:
+              path: /etc/ssl/certs
+          - name: nfs-homes
+            nfs:
+              path: /homes
+              server: litecoin-internal.local.dudoleitor.com   
+          - name: nfs-trash
+            nfs:
+              path: /k3s-cluster/nextcloud-trash
+              server: litecoin-internal.local.dudoleitor.com
+          - name: nfs-videos
+            nfs:
+              path: /videos
+              server: litecoin-internal.local.dudoleitor.com
+          - name: nfs-docs
+            nfs:
+              path: /documents
+              server: litecoin-internal.local.dudoleitor.com
+          - name: nfs-photos
+            nfs:
+              path: /photos
+              server: litecoin-internal.local.dudoleitor.com
+          - name: cache-tmp
+            emptyDir: {}

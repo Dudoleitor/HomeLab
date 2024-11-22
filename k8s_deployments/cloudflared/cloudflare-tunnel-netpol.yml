@@ -1,0 +1,74 @@
+# This policy ensures the pod can access only the internet (to reach cf)
+# and the reverse proxy but can not access services directly
+apiVersion: projectcalico.org/v3
+kind: NetworkPolicy
+metadata:
+  name: cloudflare
+  namespace: kube-system
+spec:
+  selector: app == 'cloudflared-tunnel'
+  types:
+  - Ingress
+  - Egress
+  egress:
+  - destination:
+      # allowing connections to cloudflare ips
+      selector: cf-list == 'true' 
+      ports:
+      # as per specified by the documentation
+      # https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/deploy-tunnels/tunnel-with-firewall/
+      - 443
+      - 7844
+    protocol: TCP
+    action: Allow
+  - destination:
+      # allowing connections to cloudflare ips
+      selector: cf-list == 'true' 
+      ports:
+      # as per specified by the documentation
+      # https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/deploy-tunnels/tunnel-with-firewall/
+      - 443
+      - 7844
+    protocol: UDP
+    action: Allow
+  - destination:
+      # allowing connections to cloudflare ips
+      selector: cf-list == 'true' 
+      ports:
+      # as per specified by the documentation
+      # https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/deploy-tunnels/tunnel-with-firewall/
+      - 443
+      - 7844
+    protocol: TCP
+    action: Allow
+  - destination:
+      # allowing connections to cloudflare ips
+      selector: cf-list == 'true' 
+      ports:
+      # as per specified by the documentation
+      # https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/deploy-tunnels/tunnel-with-firewall/
+      - 443
+      - 7844
+    protocol: UDP
+    action: Allow
+  - destination:  # Allowing connections to traefik
+      selector: app.kubernetes.io/name == 'traefik' && app.kubernetes.io/instance == 'traefik-external'
+      namespaceSelector: kubernetes.io/metadata.name == 'kube-system'
+      ports:
+      - websecure
+    protocol: TCP
+    action: Allow
+  - destination:  # Allowing connections to the dns resolver
+      selector: k8s-app == 'kube-dns'
+      namespaceSelector: kubernetes.io/metadata.name == 'kube-system'
+      ports:
+      - 53
+    protocol: UDP
+    action: Allow
+  - destination:  # Allowing connections to the dns resolver
+      selector: k8s-app == 'kube-dns'
+      namespaceSelector: kubernetes.io/metadata.name == 'kube-system'
+      ports:
+      - 53
+    protocol: TCP
+    action: Allow

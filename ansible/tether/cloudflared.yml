@@ -1,0 +1,9 @@
+tunnel: surveillance
+credentials-file: /root/cloudflared-creds.json
+
+ingress:
+  - hostname: domain.com
+    service: https://127.0.0.1:443
+    originRequest:  # As we are using localhost
+      noTLSVerify: true
+  - service: http_status:404

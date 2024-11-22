@@ -1,0 +1,222 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: crowdsec-tr-bouncer
+    type: bouncer
+  name: crowdsec-tr-bouncer
+  namespace: crowdsec
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+  revisionHistoryLimit: 0  # Cleaning up all old replicasets
+  selector:
+    matchLabels:
+      app: crowdsec-tr-bouncer
+      type: bouncer
+  template:
+    metadata:
+      labels:
+        app: crowdsec-tr-bouncer
+        type: bouncer
+    spec:
+      priorityClassName: higher-priority-2000
+      containers:
+      - env:
+        # Run 'cscli -oraw bouncers add traefikbouncer' inside the lapi container
+        - name: CROWDSEC_BOUNCER_API_KEY
+          valueFrom:
+            secretKeyRef:
+              key: traefik
+              name: bouncer-credentials
+        - name: CROWDSEC_AGENT_HOST
+          value: "crowdsec-service.crowdsec:8080"
+        - name: GIN_MODE
+          value: "release"
+        - name: TRUSTED_PROXIES
+          value: "0.0.0.0/0,::/0"
+        image: fbonalair/traefik-crowdsec-bouncer:0.5.0
+        imagePullPolicy: IfNotPresent
+        name: crowdsec-tr-bouncer
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        securityContext:
+          privileged: false
+          allowPrivilegeEscalation: false
+          runAsUser: 65426
+          runAsGroup: 65426
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+      dnsPolicy: ClusterFirst
+      securityContext:
+        fsGroup: 65426
+      initContainers:  # To ensure the agent starts only after the central api
+      - command:
+        - sh
+        - -c
+        - until nc -vvz -w 5 crowdsec-service.crowdsec 8080; do echo waiting for lapi to start;
+          sleep 2; done
+        image: busybox:1.37
+        imagePullPolicy: IfNotPresent
+        name: wait-for-lapi
+        resources: {}
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      terminationGracePeriodSeconds: 30
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    k8s-app: crowdsec-cf-bouncer
+    type: bouncer
+  name: crowdsec-cf-bouncer
+  namespace: crowdsec
+spec:
+  replicas: 1
+  revisionHistoryLimit: 0
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      k8s-app: crowdsec-cf-bouncer
+      type: bouncer
+  template:
+    metadata:
+      labels:
+        k8s-app: crowdsec-cf-bouncer
+        type: bouncer
+    spec:
+      containers:
+      - image: crowdsecurity/cloudflare-bouncer:latest
+        imagePullPolicy: IfNotPresent
+        name: crowdsec-cf-bouncer
+        command:
+        - sh 
+        - -c  
+        - cp -f /etc/crowdsec/cf-bouncer/config-template.yaml /etc/crowdsec/cf-bouncer/cloudflare-bouncer.yaml
+          && sed -i "s/API_KEY/$API_KEY/g" /etc/crowdsec/cf-bouncer/cloudflare-bouncer.yaml
+          && sed -i "s/ACC_1_ID/$ACC_1_ID/g" /etc/crowdsec/cf-bouncer/cloudflare-bouncer.yaml
+          && sed -i "s/ACC_2_ID/$ACC_2_ID/g" /etc/crowdsec/cf-bouncer/cloudflare-bouncer.yaml
+          && sed -i "s/ACC_1_ZONE_ID/$ACC_1_ZONE_ID/g" /etc/crowdsec/cf-bouncer/cloudflare-bouncer.yaml
+          && sed -i "s/ACC_2_ZONE_ID/$ACC_2_ZONE_ID/g" /etc/crowdsec/cf-bouncer/cloudflare-bouncer.yaml
+          && sed -i "s/ACC_1_TOKEN/$ACC_1_TOKEN/g" /etc/crowdsec/cf-bouncer/cloudflare-bouncer.yaml
+          && sed -i "s/ACC_2_TOKEN/$ACC_2_TOKEN/g" /etc/crowdsec/cf-bouncer/cloudflare-bouncer.yaml
+          && /usr/local/bin/crowdsec-cloudflare-bouncer -c /etc/crowdsec/cf-bouncer/cloudflare-bouncer.yaml
+        env:
+        - name: API_KEY
+          valueFrom:
+            secretKeyRef:
+              key: cloudflare
+              name: bouncer-credentials
+        - name: ACC_1_ID
+          valueFrom:
+            secretKeyRef:
+              name: cloudflare-creds
+              key: acc-1-id 
+        - name: ACC_2_ID
+          valueFrom:
+            secretKeyRef:
+              name: cloudflare-creds
+              key: acc-2-id 
+        - name: ACC_1_ZONE_ID
+          valueFrom:
+            secretKeyRef:
+              name: cloudflare-creds
+              key: acc-1-zone-id 
+        - name: ACC_2_ZONE_ID
+          valueFrom:
+            secretKeyRef:
+              name: cloudflare-creds
+              key: acc-2-zone-id 
+        - name: ACC_1_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: cloudflare-creds
+              key: acc-1-token 
+        - name: ACC_2_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: cloudflare-creds
+              key: acc-2-token 
+        # Run 'cscli -oraw bouncers add cloudflarebouncer' inside the lapi container
+        - name: API_URL
+          value: "http://crowdsec-service.crowdsec:8080/"
+        ports:
+        - containerPort: 2112
+          name: metrics
+          protocol: TCP
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /etc/crowdsec/cf-bouncer/config-template.yaml
+          name: bc-config
+          subPath: config.yaml
+        - mountPath: /etc/crowdsec/cf-bouncer
+          name: config-dir
+        securityContext:
+          privileged: false
+          allowPrivilegeEscalation: false
+          runAsUser: 65426
+          runAsGroup: 65426
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+      dnsPolicy: ClusterFirst
+      securityContext:
+        fsGroup: 65426
+      initContainers:  # To ensure the agent starts only after the central api
+      - command:
+        - sh
+        - -c
+        - until nc -vvz -w 5 crowdsec-service.crowdsec 8080; do echo waiting for lapi to start;
+          sleep 5; done
+        image: busybox:1.37
+        imagePullPolicy: IfNotPresent
+        name: wait-for-lapi
+        resources: {}
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - configMap:
+          defaultMode: 440
+          name: cf-bouncer-configmap
+        name: bc-config
+      - name: config-dir
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: crowdsec-tr-bouncer
+  name: crowdsec-traefik-bouncer
+  namespace: crowdsec
+spec:
+  type: ClusterIP
+  internalTrafficPolicy: Cluster
+  ports:
+  - name: http
+    port: 8080
+    protocol: TCP
+    targetPort: http
+  selector:
+    app: crowdsec-tr-bouncer
+    type: bouncer

@@ -1,0 +1,74 @@
+- hosts: --redacted--
+  become: yes
+  gather_facts: no
+  strategy: free
+  tasks:
+  - name: Upgrade hosts (except databases)
+    apt:
+      update_cache: yes
+      upgrade: yes
+      force_apt_get: yes
+      autoremove: yes
+  - name: Clean apt cache (except databases)
+    apt:
+      clean: yes
+- hosts: --redacted--
+  become: yes
+  serial: 1
+  tasks:
+  - name: Upgrade hosts with databases
+    apt:
+      update_cache: yes
+      upgrade: yes
+      force_apt_get: yes
+      autoremove: yes
+  - name: Clean apt cache with databases
+    apt:
+      clean: yes
+  - name: Wait for mariadb server to be running
+    service_facts:
+    register: mariadb_status
+    until: mariadb_status.ansible_facts.services['mariadb'].state == 'running'
+    retries: 10
+    delay: 4
+- hosts: --redacted--
+  become: yes
+  gather_facts: no
+  tasks:
+  - name: Update pihole
+    command: pihole -up
+    register: pihole_up
+    changed_when: '"\n  [✓] Everything is up to date!" not in pihole_up.stdout'
+  
+  - name: Download latest cloudflared binary
+    get_url:
+      dest: /usr/local/bin/cloudflared-latest
+      mode: 0555
+      owner: cloudflared
+      group: cloudflared
+      url: "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-{{ arch }}"
+      force: yes
+    register: cloudflared_download
+
+  - name: Stop cloudflared service
+    when: cloudflared_download.changed
+    service:
+      name: cloudflared
+      state: stopped
+
+  - name: Overwrite cloudflared binary
+    when: cloudflared_download.changed
+    copy:
+      src: /usr/local/bin/cloudflared-latest
+      dest: /usr/local/bin/cloudflared
+      mode: 0555
+      owner: cloudflared
+      group: cloudflared
+      force: yes
+      remote_src: yes
+
+  - name: Restart cloudflared service
+    when: cloudflared_download.changed
+    service:
+      name: cloudflared
+      state: started

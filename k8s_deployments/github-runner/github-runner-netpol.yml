@@ -1,0 +1,34 @@
+# This Policy ensures that the pod can only reach the internet
+# and is not hit by any traffic
+apiVersion: projectcalico.org/v3
+kind: NetworkPolicy
+metadata:
+  name: github-runner
+  namespace: github-runner
+spec:
+  selector: app == 'github-runner'
+  ingress:
+  egress:
+  - destination:  # Allowing connections to the dns resolver
+      selector: k8s-app == 'kube-dns'
+      namespaceSelector: kubernetes.io/metadata.name == 'kube-system'
+      ports:
+      - 53
+    protocol: UDP
+    action: Allow
+  - destination:  # Allowing connections to the dns resolver
+      selector: k8s-app == 'kube-dns'
+      namespaceSelector: kubernetes.io/metadata.name == 'kube-system'
+      ports:
+      - 53
+    protocol: TCP
+    action: Allow
+  - destination:  # Blocking connections to LAN
+      selector: lan-blacklist == 'true'
+    action: Deny
+  - destination:  # Allowing connections to the internet
+      ports:
+      - 80
+      - 443
+    protocol: TCP
+    action: Allow

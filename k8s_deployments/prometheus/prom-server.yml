@@ -1,0 +1,120 @@
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: lower-priority
+  namespace: monitoring
+value: -1000
+globalDefault: false
+preemptionPolicy: Never
+description: "This priority class ensures the pod is evicted if resources are low"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus-server
+  annotations:
+    field.cattle.io/description: Prometheus server
+  namespace: monitoring
+spec:
+  replicas: 1
+  strategy: 
+    type: Recreate
+  revisionHistoryLimit: 0  # Cleaning up all old replicasets
+  selector: 
+    matchLabels: 
+     app: prometheus-server
+  template:
+    metadata:
+      labels:
+        app: prometheus-server
+    spec:
+      priorityClassName: lower-priority
+      containers:
+      - image: prom/prometheus:v2.55.1
+        imagePullPolicy: IfNotPresent
+        name: prometheus
+        args:
+          - "--storage.tsdb.retention.time=12h"
+          - "--config.file=/etc/prometheus/prometheus.yml"
+          - "--storage.tsdb.path=/prometheus/"
+        ports:
+        - containerPort: 9090
+          name: prom
+          protocol: TCP
+        volumeMounts:
+        - mountPath: /etc/ssl/certs/ca-certificates.crt
+          name: certs-store
+          subPath: ca-certificates.crt
+          readOnly: true
+        - mountPath: /etc/prometheus/prometheus.yml
+          name: conf
+          subPath: prometheus.yml
+          readOnly: true
+        - mountPath: /etc/prometheus/prometheus.rules
+          name: conf
+          subPath: prometheus.rules
+          readOnly: true
+        - mountPath: /prometheus/
+          name: storage
+        resources:  # Limiting resources is always better, adjust accordingly
+          limits:
+            cpu: 250m
+            memory: 1850Mi
+          requests:
+            cpu: 50m
+            memory: 512Mi
+        securityContext:
+          privileged: false
+          allowPrivilegeEscalation: false
+          runAsUser: 65221
+          runAsGroup: 65221
+          capabilities:
+            drop:
+            - ALL
+        livenessProbe:
+          failureThreshold: 10
+          initialDelaySeconds: 20
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 1
+          tcpSocket:
+            port: prom
+        readinessProbe:
+          failureThreshold: 3
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 1
+          tcpSocket:
+            port: prom
+      dnsPolicy: ClusterFirst
+      securityContext:
+        fsGroup: 65221
+        runAsUser: 65221
+        runAsGroup: 65221
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      terminationGracePeriodSeconds: 10
+      volumes:
+      - name: certs-store
+        hostPath:
+          path: /etc/ssl/certs
+      - name: conf
+        configMap:
+          name: prometheus-server-conf
+      - name: storage
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: monitoring
+spec:
+  selector: 
+    app: prometheus-server
+  ports:
+    - port: 9090
+      name: prom
+      targetPort: prom
+      protocol: TCP

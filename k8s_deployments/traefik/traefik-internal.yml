@@ -1,0 +1,137 @@
+# This deployment is used to ovverride the helm chart for traefik.
+# First, install traefik using helm:
+# helm repo add traefik https://helm.traefik.io/traefik
+# helm repo update && helm install traefik traefik/traefik
+# then delete the default deployment: kubectl delete deployment traefik -n kube-system
+# then apply this deployment.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/instance: traefik-kube-system
+    app.kubernetes.io/name: traefik
+  name: traefik
+  namespace: kube-system
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 4
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: traefik-kube-system
+      app.kubernetes.io/name: traefik
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
+  template:
+    metadata:
+      annotations:
+        prometheus.io/path: /metrics
+        prometheus.io/port: "9100"
+        prometheus.io/scrape: "true"
+      creationTimestamp: null
+      labels:
+        app.kubernetes.io/instance: traefik-kube-system
+        app.kubernetes.io/name: traefik
+    spec:
+      containers:
+      - args:
+        - --global.checknewversion
+        - --global.sendanonymoususage
+        - --entrypoints.metrics.address=:9100/tcp
+        - --entrypoints.traefik.address=:9000/tcp
+        - --entrypoints.web.address=:8000
+        - --entrypoints.web.http.middlewares=kube-system-securedin@kubernetescrd  # Using the secured chain
+        - --entrypoints.websecure.address=:8443
+        - --entrypoints.websecure.http3=true
+        - --entrypoints.websecure.http.middlewares=kube-system-securedin@kubernetescrd
+        - --api.dashboard=true
+        - --ping=true
+        - --metrics.prometheus=true
+        - --metrics.prometheus.entrypoint=metrics
+        - --providers.kubernetescrd
+        - --providers.kubernetescrd.namespaces=default,monitoring,kube-system,longhorn-system,authelia
+        - --providers.kubernetesingress
+        - --providers.kubernetesingress.namespaces=default,monitoring,kube-system,longhorn-system,authelia
+        - --providers.kubernetesingress.ingressendpoint.publishedservice=kube-system/traefik
+        - --entrypoints.websecure.http.tls=true
+        - --experimental.plugins.traefik-modsecurity-plugin.modulename=github.com/madebymode/traefik-modsecurity-plugin
+        - --experimental.plugins.traefik-modsecurity-plugin.version=v1.6.0
+        image: traefik:v3.2.0
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /ping
+            port: 9000
+            scheme: HTTP
+          initialDelaySeconds: 2
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 2
+        name: traefik
+        ports:
+        - containerPort: 9100
+          name: metrics
+          protocol: TCP
+        - containerPort: 9000
+          name: traefik
+          protocol: TCP
+        - containerPort: 8000
+          name: web
+          protocol: TCP
+        - containerPort: 8000
+          name: web-udp
+          protocol: UDP
+        - containerPort: 8443
+          name: websecure
+          protocol: TCP
+        - containerPort: 8443
+          name: websecure-udp
+          protocol: UDP
+        readinessProbe:
+          failureThreshold: 1
+          httpGet:
+            path: /ping
+            port: 9000
+            scheme: HTTP
+          initialDelaySeconds: 2
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 2
+        resources: {}
+        securityContext:
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsGroup: 65532
+          runAsNonRoot: true
+          runAsUser: 65532
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /data
+          name: data
+        - mountPath: /tmp
+          name: tmp
+        - mountPath: /plugins-storage
+          name: pl
+      dnsPolicy: ClusterFirst
+      priorityClassName: system-cluster-critical
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext:
+        fsGroup: 65532
+      serviceAccount: traefik
+      serviceAccountName: traefik
+      terminationGracePeriodSeconds: 60
+      volumes:
+      - emptyDir: {}
+        name: data
+      - emptyDir: {}
+        name: tmp
+      - emptyDir: {}
+        name: pl

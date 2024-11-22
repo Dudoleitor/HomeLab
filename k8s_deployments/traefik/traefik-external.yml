@@ -1,0 +1,261 @@
+# This deployment adds a second ingress controller to handle
+# external traffic. The annotation 'kubernetes.io/ingress.class: traefik-external'
+# and the label 'traffic-type: external' need both to be set
+# for an ingress (ingressroute/middleware) to be recognised by this ingress.
+# When the ingress class is specified on a ingress, the default (internal)
+# traefik instance won't consider that ingress.
+# This instance needs to be connected to a pilot account in order to use plugins,
+# set a valid token in the configs.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traefik-external
+  annotations:
+    field.cattle.io/description: Reverse proxy for external traffic   
+  labels:
+    app.kubernetes.io/instance: traefik-external
+    app.kubernetes.io/name: traefik
+  namespace: kube-system
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 4
+  revisionHistoryLimit: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: traefik-external
+      app.kubernetes.io/name: traefik
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+    type: RollingUpdate
+  template:
+    metadata:
+      annotations:
+        prometheus.io/path: /metrics
+        prometheus.io/port: "9100"
+        prometheus.io/scrape: "true"
+      labels:
+        app.kubernetes.io/instance: traefik-external
+        app.kubernetes.io/name: traefik
+    spec:
+      containers:
+      - name: traefik
+        args:
+        - --global.checknewversion
+        - --global.sendanonymoususage
+        - --entrypoints.metrics.address=:9100/tcp
+        - --entrypoints.traefik.address=:9000/tcp
+        - --entrypoints.web.address=:8000
+        - --entrypoints.web.forwardedHeaders.insecure  # Always Trusting Forwarded Headers
+        - --entrypoints.web.http.middlewares=kube-system-securedext@kubernetescrd  # Using the secured chain
+        - --entrypoints.websecure.address=:8443
+        - --entrypoints.websecure.http3
+        - --entrypoints.websecure.forwardedHeaders.insecure
+        - --entrypoints.websecure.http.middlewares=kube-system-securedext@kubernetescrd
+        - --api.dashboard=true
+        - --ping=true
+        - --accesslog=true  # Needed by crowdsec
+        - --log.level=INFO
+        - --metrics.prometheus=true
+        - --metrics.prometheus.entrypoint=metrics
+        - --entrypoints.websecure.http.tls=true
+        - --entrypoints.websecure.http.redirections.entryPoint.scheme=https
+        - --experimental.plugins.real-ip.moduleName=github.com/Paxxs/traefik-get-real-ip
+        - --experimental.plugins.real-ip.version=v1.0.2
+    # The following flags select the label and the annotation for the
+    # ingress routes.
+        - --providers.kubernetescrd
+        - --providers.kubernetescrd.ingressclass=traefik-external
+        - --providers.kubernetescrd.labelselector=traffic-type=external
+        - --providers.kubernetescrd.namespaces=default,monitoring,kube-system,authelia
+    # The following flags select the label and the annotation for the
+    # ingresses.
+        - --providers.kubernetesingress
+        - --providers.kubernetesingress.ingressclass=traefik-external
+        - --providers.kubernetesingress.labelselector=traffic-type=external
+        - --providers.kubernetesingress.namespaces=default,monitoring,kube-system,authelia
+        - --providers.kubernetesingress.ingressendpoint.publishedservice=kube-system/traefik-external
+        image: traefik:v3.2.0
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /ping
+            port: 9000
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 2
+        ports:
+        - containerPort: 9100
+          name: metrics
+          protocol: TCP
+        - containerPort: 9000
+          name: traefik
+          protocol: TCP
+        - containerPort: 8000
+          name: web
+          protocol: TCP
+        - containerPort: 8443
+          name: websecure
+          protocol: TCP
+        - containerPort: 8443
+          name: websecure-udp
+          protocol: UDP
+        readinessProbe:
+          failureThreshold: 1
+          httpGet:
+            path: /ping
+            port: 9000
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 2
+        resources: {}
+        securityContext:
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsGroup: 65432
+          runAsNonRoot: true
+          runAsUser: 65432
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /data
+          name: data
+        - mountPath: /tmp
+          name: tmp
+        - mountPath: /plugins-storage
+          name: pl
+      dnsPolicy: ClusterFirst
+      priorityClassName: system-cluster-critical
+      serviceAccount: traefik
+      serviceAccountName: traefik
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext:
+        fsGroup: 65432
+      terminationGracePeriodSeconds: 60
+      volumes:
+      - emptyDir: {}
+        name: data
+      - emptyDir: {}
+        name: tmp
+      - emptyDir: {}
+        name: pl
+---
+kind: Service 
+apiVersion: v1 
+metadata:
+  name: traefik-external-cluster
+  namespace: kube-system
+spec:
+  type: ClusterIP 
+  selector:
+    app.kubernetes.io/instance: traefik-external
+    app.kubernetes.io/name: traefik
+  ports:
+  - name: web
+    port: 80
+    protocol: TCP
+    targetPort: web
+  - name: web
+    port: 80
+    protocol: UDP
+    targetPort: web-udp
+  - name: websecure
+    port: 443
+    protocol: TCP
+    targetPort: websecure
+  - name: websecure-udp
+    port: 443
+    protocol: UDP
+    targetPort: websecure-udp
+  - name: traefik
+    port: 9000
+    protocol: TCP
+    targetPort: traefik
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    metallb.universe.tf/loadBalancerIPs: 1.2.3.52
+  labels:
+    app.kubernetes.io/instance: traefik-external
+    app.kubernetes.io/name: traefik
+  name: traefik-external
+  namespace: kube-system
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+  - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+  - name: web
+    port: 80
+    protocol: TCP
+    targetPort: web
+  - name: web-udp
+    port: 80
+    protocol: UDP
+    targetPort: web-udp
+  - name: websecure
+    port: 443
+    protocol: TCP
+    targetPort: websecure
+  - name: websecure-udp
+    port: 443
+    protocol: UDP
+    targetPort: websecure-udp
+  selector:
+    app.kubernetes.io/instance: traefik-external
+    app.kubernetes.io/name: traefik
+  sessionAffinity: None
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    metallb.universe.tf/loadBalancerIPs: 1:2:3::52
+  labels:
+    app.kubernetes.io/instance: traefik-external
+    app.kubernetes.io/name: traefik
+  name: traefik-external-v6
+  namespace: kube-system
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+  - IPv6
+  ipFamilyPolicy: SingleStack
+  ports:
+  - name: web
+    port: 80
+    protocol: TCP
+    targetPort: web
+  - name: web-udp
+    port: 80
+    protocol: UDP
+    targetPort: web-udp
+  - name: websecure
+    port: 443
+    protocol: TCP
+    targetPort: websecure
+  - name: websecure-udp
+    port: 443
+    protocol: UDP
+    targetPort: websecure-udp
+  selector:
+    app.kubernetes.io/instance: traefik-external
+    app.kubernetes.io/name: traefik
+  sessionAffinity: None

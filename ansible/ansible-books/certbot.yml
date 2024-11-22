@@ -1,0 +1,39 @@
+- hosts: --redacted--
+  become: yes
+  gather_facts: no
+  tasks:
+  - name: Update packages
+    apt:
+      update_cache: yes
+      upgrade: yes
+      force_apt_get: yes
+  - name: Install snap
+    apt:
+      name: snapd
+      update_cache: yes
+      state: latest
+  - name: Install snap core
+    snap:
+      name: core
+      state: present
+  
+  - name: Install certbot
+    snap:
+      name: certbot
+      classic: yes
+      state: present
+
+  - name: Trust certbot plugin
+    shell: 
+      cmd: snap set certbot trust-plugin-with-root=ok
+  - name: Install cloudflare plugin
+    snap:
+      name: certbot-dns-cloudflare
+      state: present
+
+# The file /root/cloudflare_certbot_cred.ini must contain the API key to access cloudflare !
+  - name: Configure the cert
+    shell: 
+      cmd:  /snap/bin/certbot certonly -n --dns-cloudflare --dns-cloudflare-propagation-seconds 60 --dns-cloudflare-credentials /root/cloudflare_certbot_cred.ini --cert-name domain1.dudoleitor.com -d domain1.dudoleitor.com -d domain2.dudoleitor.com -d domain3.dudoleitor.com --agree-tos --key-type ecdsa -m certmaster@dudoleitor.com --post-hook "/usr/bin/systemctl reload dovecot.service postfix.service"
+    register: certbot
+    changed_when: '"no action taken" not in certbot.stdout'

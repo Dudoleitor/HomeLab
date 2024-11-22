@@ -1,0 +1,20 @@
+# This Policy ensures that the pod is reached only by graphana.
+# All egress connections are allowed.
+apiVersion: projectcalico.org/v3
+kind: NetworkPolicy
+metadata:
+  name: prometheus-server
+  namespace: monitoring
+spec:
+  selector: app == 'prometheus-server'
+  types:
+  - Ingress
+  ingress:
+  - source:  # Allowing connections from graphana
+      selector: app == 'grafana'
+      namespaceSelector: kubernetes.io/metadata.name == 'monitoring'
+    destination:
+      ports:
+      - prom
+    protocol: TCP
+    action: Allow

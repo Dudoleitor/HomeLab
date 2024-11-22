@@ -1,0 +1,21 @@
+# This Policy ensures that the pod is reached only by prometheus
+# and does not make outbound connections.
+apiVersion: projectcalico.org/v3
+kind: NetworkPolicy
+metadata:
+  name: node-exporter
+  namespace: monitoring
+spec:
+  selector: app == 'node-exporter'
+  types:
+  - Ingress
+  - Egress
+  ingress:
+  - source:  # Allowing connections from prometheus
+      selector: app.kubernetes.io/name == 'prometheus-server'
+      namespaceSelector: kubernetes.io/metadata.name == 'monitoring'
+    destination:
+      ports:
+      - metrics
+    protocol: TCP
+    action: Allow

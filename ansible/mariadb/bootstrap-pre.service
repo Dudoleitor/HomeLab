@@ -1,0 +1,9 @@
+[Unit]
+Description=Setting env variable to bootstrap MariaDB cluster
+Before=mariadb.service
+
+[Service]
+ExecStart=/usr/bin/mariadb_bootstrap_env set
+
+[Install]
+WantedBy=multi-user.target

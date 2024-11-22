@@ -1,0 +1,49 @@
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: lower-priority-1000
+  namespace: default
+value: -1000
+globalDefault: false
+preemptionPolicy: Never
+description: "This priority class ensures the pod is evicted if resources are low"
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: lower-priority-1500
+  namespace: default
+value: -1500
+globalDefault: false
+preemptionPolicy: Never
+description: "This priority class ensures the pod is evicted if resources are low"
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: lower-priority-2000
+  namespace: default
+value: -2000
+globalDefault: false
+preemptionPolicy: Never
+description: "This priority class ensures the pod is evicted if resources are low"
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: higher-priority-1000
+  namespace: default
+value: 1000
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: "This priority class ensures the pod is prioritized"
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: higher-priority-2000
+  namespace: default
+value: 2000
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: "This priority class ensures the pod is prioritized"

@@ -1,0 +1,60 @@
+# This Policy ensures that the pod is hit by traffik coming from
+# cloudflare only.
+# We need to allow traffic from the internal reverse proxy in order
+# to display the dashboard.
+apiVersion: projectcalico.org/v3
+kind: NetworkPolicy
+metadata:
+  name: traefik-external
+  namespace: kube-system
+spec:
+  selector: app.kubernetes.io/name == 'traefik' && app.kubernetes.io/instance == 'traefik-external'
+  types:
+  - Ingress
+  ingress:
+  - source:  # Allowing connections from the internal traefik
+      selector: app.kubernetes.io/name == 'traefik'
+      namespaceSelector: kubernetes.io/metadata.name == 'kube-system'
+    destination:
+      ports:
+      - traefik
+    protocol: TCP
+    action: Allow
+  - source:  # Allowing connections from cloudflare tunnel
+      selector: app == 'cloudflared-tunnel'
+      namespaceSelector: kubernetes.io/metadata.name == 'kube-system'
+    destination:
+      ports:
+      - websecure
+    protocol: TCP
+    action: Allow
+  - source:  # Allowing connections from cloudflare tunnel
+      selector: app == 'cloudflared-tunnel'
+      namespaceSelector: kubernetes.io/metadata.name == 'kube-system'
+    destination:
+      ports:
+      - websecure-udp
+    protocol: UDP
+    action: Allow
+  - source:  # Allowing connections from cloudflare
+      selector: cf-list == 'true'
+    destination:
+      ports:
+      - websecure
+    protocol: TCP
+    action: Allow
+  - source:  # Allowing connections from cloudflare
+      selector: cf-list == 'true'
+    destination:
+      ports:
+      - websecure-udp
+    protocol: UDP
+    action: Allow
+  - source:  # Allowing connections from prometheus server
+      selector: app == 'prometheus-server'
+      namespaceSelector: kubernetes.io/metadata.name == 'monitoring'
+    destination:
+      ports:
+      - metrics
+    protocol: TCP
+    action: Allow

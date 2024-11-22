@@ -1,0 +1,69 @@
+# This Policy ensures that the pod can access only authorized IPs
+# and is hit by traffic coming from the reverse proxy only
+apiVersion: projectcalico.org/v3
+kind: NetworkPolicy
+metadata:
+  name: guacamole
+  namespace: default
+spec:
+  selector: app == 'guacamole'
+  ingress:
+  - source:  # Allowing connections from the reverse proxy
+      selector: app.kubernetes.io/name == 'traefik'
+      namespaceSelector: kubernetes.io/metadata.name == 'kube-system'
+    destination:
+      ports:
+      - guacamole-ui
+    protocol: TCP
+    action: Allow
+  egress:
+  - destination:
+      nets:
+      - 1.2.3.4/32  # server hosting the wol service
+      ports:
+      - 8080
+    protocol: TCP
+    action: Allow
+  - destination:
+      nets:
+      - 1.2.3.4/32  # mysql db
+      ports:
+      - 3305
+    protocol: TCP
+    action: Allow
+  - destination:
+      nets:
+      - 1.2.3.4/32  # PC1
+      ports:
+      - 3389  # RDP
+    protocol: TCP
+    action: Allow
+  - destination:  # Allowing connections to the dns resolver
+      selector: k8s-app == 'kube-dns'
+      namespaceSelector: kubernetes.io/metadata.name == 'kube-system'
+      ports:
+      - 53
+    protocol: UDP
+    action: Allow
+  - destination:  # Allowing connections to the dns resolver
+      selector: k8s-app == 'kube-dns'
+      namespaceSelector: kubernetes.io/metadata.name == 'kube-system'
+      ports:
+      - 53
+    protocol: TCP
+    action: Allow
+  - destination:  # Allowing connections to authelia
+      selector: app == 'authelia'
+      namespaceSelector: kubernetes.io/metadata.name == 'authelia'
+      ports:
+      - authelia
+    protocol: TCP
+    action: Allow
+  - destination:  # Blocking connections to LAN
+      selector: lan-blacklist == 'true'
+    action: Deny
+  - destination:  # Allowing connections to download extensions from github
+      ports:
+      - 443
+    protocol: TCP
+    action: Allow

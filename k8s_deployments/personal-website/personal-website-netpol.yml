@@ -1,0 +1,19 @@
+# This Policy ensures that the pod is hit by traffic coming from
+# the reverse proxy only and does not connect to anything.
+apiVersion: projectcalico.org/v3
+kind: NetworkPolicy
+metadata:
+  name: vaultwarden
+  namespace: default
+spec:
+  selector: app == 'lighttpd'
+  ingress:
+  - source:  # Allowing connections from the reverse proxy
+      selector: app.kubernetes.io/name == 'traefik'
+      namespaceSelector: kubernetes.io/metadata.name == 'kube-system'
+    destination:
+      ports:
+      - lighttpd-http
+    protocol: TCP
+    action: Allow
+  egress:

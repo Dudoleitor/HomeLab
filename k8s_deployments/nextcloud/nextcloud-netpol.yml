@@ -1,0 +1,160 @@
+# This Policy ensures that the pod can access only the resources it's meant to
+# and is hit by traffic coming from the reverse proxy only.
+# The netpol is mandatory as we'll trust headers from any IP !!
+apiVersion: projectcalico.org/v3
+kind: NetworkPolicy
+metadata:
+  name: nextcloud-nginx
+  namespace: default
+spec:
+  selector: app == 'nginx' && service == 'nextcloud'
+  ingress:
+  - source:  # Allowing connections from the reverse proxy
+      selector: app.kubernetes.io/name == 'traefik'
+      namespaceSelector: kubernetes.io/metadata.name == 'kube-system'
+    destination:
+      ports:
+      - http
+    protocol: TCP
+    action: Allow
+  egress:
+  - destination:  # Allowing connections to the php backend
+      selector: app == 'php-fpm' && service == 'nextcloud'
+      namespaceSelector: kubernetes.io/metadata.name == 'default'
+      ports:
+      - fpm
+    protocol: TCP
+    action: Allow
+  - destination:  # Allowing connections to redis cache
+      selector: app == 'redis' && instance == 'cache'
+      namespaceSelector: kubernetes.io/metadata.name == 'default'
+      ports:
+      - redis
+    protocol: TCP
+    action: Allow
+  - destination:  # Allowing connections to the dns resolver
+      selector: k8s-app == 'kube-dns'
+      namespaceSelector: kubernetes.io/metadata.name == 'kube-system'
+      ports:
+      - 53
+    protocol: UDP
+    action: Allow
+  - destination:  # Allowing connections to the dns resolver
+      selector: k8s-app == 'kube-dns'
+      namespaceSelector: kubernetes.io/metadata.name == 'kube-system'
+      ports:
+      - 53
+    protocol: TCP
+    action: Allow
+
+# This Policy ensures that the pod can access only the resources it's meant to
+# and is hit by traffic coming from the nginx frontend only
+---
+apiVersion: projectcalico.org/v3
+kind: NetworkPolicy
+metadata:
+  name: nextcloud-php
+  namespace: default
+spec:
+  selector: app == 'php-fpm'
+  ingress:
+  - source:  # Allowing connections from the reverse proxy
+      selector: app == 'nginx' && service == 'nextcloud'
+      namespaceSelector: kubernetes.io/metadata.name == 'default'
+    destination:
+      ports:
+      - fpm
+    protocol: TCP
+    action: Allow
+  egress:
+  - destination:
+      nets:
+      - 1.2.3.4/32  # mysql db
+      ports:
+      - 3305
+    protocol: TCP
+    action: Allow
+  - destination:  # Allowing connections to redis cache
+      selector: app == 'redis' && instance == 'cache'
+      namespaceSelector: kubernetes.io/metadata.name == 'default'
+      ports:
+      - redis
+    protocol: TCP
+    action: Allow
+  - destination:  # Allowing connections to the dns resolver
+      selector: k8s-app == 'kube-dns'
+      namespaceSelector: kubernetes.io/metadata.name == 'kube-system'
+      ports:
+      - 53
+    protocol: UDP
+    action: Allow
+  - destination:  # Allowing connections to the dns resolver
+      selector: k8s-app == 'kube-dns'
+      namespaceSelector: kubernetes.io/metadata.name == 'kube-system'
+      ports:
+      - 53
+    protocol: TCP
+    action: Allow
+  - destination:  # Allowing connections to the reverse proxy, for authelia
+      selector: app.kubernetes.io/name == 'traefik'
+      namespaceSelector: kubernetes.io/metadata.name == 'kube-system'
+    destination:
+      ports:
+      - websecure
+    protocol: TCP
+    action: Allow
+    protocol: TCP
+    action: Allow
+  - destination:  # Blocking connections to LAN
+      selector: lan-blacklist == 'true'
+    action: Deny
+  - destination:  # Allowing connections to the internet
+      ports:
+      - 80
+      - 443
+      - 993  # imap over ssl
+      - 587  # smtp with starttls
+      - 465  # smtp with ssl
+    protocol: TCP
+    action: Allow
+# This policy allows the folder-refresh pod to access kubernetes API
+# to restart the inotify deployment.
+# Also, the policy blocks all incoming traffic to the pod.
+---
+apiVersion: projectcalico.org/v3
+kind: NetworkPolicy
+metadata:
+  name: nextcloud-foldersrefresh
+  namespace: default
+spec:
+  selector: app == 'php-fpm' && service == 'nextcloud-foldersrefresh'
+  types:
+  - Ingress
+  - Egress
+  egress:
+  - destination:
+      nets:
+      - 1.2.3.4/32
+      ports:
+      - 6443
+    protocol: TCP
+    action: Allow
+  - destination:
+      nets:
+      - 1.2.3.4/32
+      ports:
+      - 6443
+    protocol: TCP
+    action: Allow
+
+# This policy blocks incoming traffic to the inofify and background jobs pods
+---
+apiVersion: projectcalico.org/v3
+kind: NetworkPolicy
+metadata:
+  name: nextcloud-backgroupjo
+  namespace: default
+spec:
+  selector: app == 'php-fpm' && (service == 'nextcloud-backgroundjobs' || service == 'nextcloud-inotify')
+  types:
+  - Ingress

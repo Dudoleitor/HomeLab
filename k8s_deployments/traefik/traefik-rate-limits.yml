@@ -1,0 +1,65 @@
+# These are the default ratelimit setting for each ingress.
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: ratelimitin
+  namespace: kube-system
+  labels:
+    traffic-type: internal
+  annotations:
+    kubernetes.io/ingress.class: traefik-internal
+spec:
+  rateLimit:
+    average: 30
+    burst: 55
+    sourceCriterion:
+      ipStrategy:
+        depth: 1
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: inflightreqin
+  namespace: kube-system
+  labels:
+    traffic-type: internal
+  annotations:
+    kubernetes.io/ingress.class: traefik-internal
+spec:
+  inFlightReq:
+    amount: 40
+    sourceCriterion:
+      ipStrategy:
+        depth: 1
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: ratelimitext
+  namespace: kube-system
+  labels:
+    traffic-type: external  # To be detected by the external proxy
+  annotations:
+    kubernetes.io/ingress.class: traefik-external
+spec:
+  rateLimit:
+    average: 30
+    burst: 55
+    sourceCriterion:
+      requestHeaderName: Cf-Connecting-Ip
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: inflightreqext
+  namespace: kube-system
+  labels:
+    traffic-type: external  # To be detected by the external proxy
+  annotations:
+    kubernetes.io/ingress.class: traefik-external
+spec:
+  inFlightReq:
+    amount: 40
+    sourceCriterion:
+      requestHeaderName: Cf-Connecting-Ip

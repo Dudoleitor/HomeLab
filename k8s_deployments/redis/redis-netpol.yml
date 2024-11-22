@@ -1,0 +1,65 @@
+# This Policy ensures that the pod can be hit only by trusted pods
+apiVersion: projectcalico.org/v3
+kind: NetworkPolicy
+metadata:
+  name: redis
+  namespace: default
+spec:
+  selector: app == 'redis' && instance == 'cache'
+  ingress:
+  - source:  # Allowing connections from nextcloud nginx
+      selector: app == 'nginx' && service == 'nextcloud'
+      namespaceSelector: kubernetes.io/metadata.name == 'default'
+    destination:
+      ports:
+      - redis
+    protocol: TCP
+    action: Allow
+  - source:  # Allowing connections from nextcloud php backend
+      selector: app == 'php-fpm' && service == 'nextcloud'
+      namespaceSelector: kubernetes.io/metadata.name == 'default'
+    destination:
+      ports:
+      - redis
+    protocol: TCP
+    action: Allow
+  - source:  # Allowing connections from nextcloud php backgroundjobs
+      selector: app == 'php-fpm' && service == 'nextcloud-backgroundjobs'
+      namespaceSelector: kubernetes.io/metadata.name == 'default'
+    destination:
+      ports:
+      - redis
+    protocol: TCP
+    action: Allow
+  - source:  # Allowing connections from nextcloud php foldersrefresh
+      selector: app == 'php-fpm' && service == 'nextcloud-foldersrefresh'
+      namespaceSelector: kubernetes.io/metadata.name == 'default'
+    destination:
+      ports:
+      - redis
+    protocol: TCP
+    action: Allow
+  - source:  # Allowing connections from nextcloud php inotify
+      selector: app == 'php-fpm' && service == 'nextcloud-inotify'
+      namespaceSelector: kubernetes.io/metadata.name == 'default'
+    destination:
+      ports:
+      - redis
+    protocol: TCP
+    action: Allow
+  - source:  # Allowing connections from authelia
+      selector: app == 'authelia'
+      namespaceSelector: kubernetes.io/metadata.name == 'authelia'
+    destination:
+      ports:
+      - redis
+    protocol: TCP
+    action: Allow
+  egress:
+  - destination:  # Allowing connections to the dns resolver
+      selector: k8s-app == 'kube-dns'
+      namespaceSelector: kubernetes.io/metadata.name == 'kube-system'
+      ports:
+      - 53
+    protocol: UDP
+    action: Allow

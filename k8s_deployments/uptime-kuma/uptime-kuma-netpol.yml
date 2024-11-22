@@ -1,0 +1,19 @@
+# This policy ensures the pod is hit by traffic coming from the reverse proxy only.
+apiVersion: projectcalico.org/v3
+kind: NetworkPolicy
+metadata:
+  name: uptime-kuma
+  namespace: default
+spec:
+  selector: app == 'uptime-kuma'
+  types:  # Allowing everything outbound
+  - Ingress
+  ingress:
+  - source:  # Allowing connections from the reverse proxy
+      selector: app.kubernetes.io/name == 'traefik'
+      namespaceSelector: kubernetes.io/metadata.name == 'kube-system'
+    destination:
+      ports:
+      - http
+    protocol: TCP
+    action: Allow

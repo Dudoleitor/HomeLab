@@ -1,0 +1,63 @@
+---
+  - hosts: localhost
+    connection: local
+    gather_facts: no
+    become: yes
+    tasks:
+    - name: Set OpenLDAP admin password
+      debconf:
+        name: slapd
+        question: slapd/password1
+        value: "admin"
+        vtype: password
+    - name: Set OpenLDAP admin password confirmation
+      debconf:
+        name: slapd
+        question: slapd/password2
+        value: "admin"
+        vtype: password
+    
+    - name: Set OpenLDAP domain
+      debconf:
+        name: slapd
+        question: slapd/domain
+        value: "dudoleitor.com"
+        vtype: string
+
+    - name: Install OpenLDAP
+      apt:
+        name: [slapd, ldap-utils]
+        state: present
+        update_cache: yes
+
+    - name: Install FreeRadius
+      apt:
+        name: [freeradius, freeradius-ldap]
+        state: present
+        update_cache: yes
+
+    - name: Configure FreeRadius
+      copy:
+        src: /home/dudoleitor/ansible/ldap-freeradius/freeradius-config
+        dest: /etc/freeradius/3.0/sites-enabled/default
+        owner: freerad
+        group: freerad
+        mode: 0644
+    - name: Disable inner-tunnel
+      file:
+        path: /etc/freeradius/3.0/sites-enabled/inner-tunnel
+        state: absent
+    - name: Enable LDAP module in freeradius
+      copy:
+        src: /home/dudoleitor/ansible/ldap-freeradius/freeradius-ldap-config
+        dest: /etc/freeradius/3.0/mods-enabled/ldap
+        owner: freerad
+        group: freerad
+        mode: 0644
+    - name: Configure freeradius clients
+      copy:
+        src: /home/dudoleitor/ansible/ldap-freeradius/freeradius-clients
+        dest: /etc/freeradius/3.0/clients.conf
+        owner: freerad
+        group: freerad
+        mode: 0644

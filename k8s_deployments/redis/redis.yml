@@ -1,0 +1,86 @@
+# This deployment implements redis for caching purposes
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-cache
+  annotations:
+    field.cattle.io/description: redis database
+  namespace: default
+spec:
+  replicas: 1  # Replication is not configured, it needs a proxy like twemproxy to handle requests
+  selector: 
+    matchLabels: 
+     app: redis
+     instance: cache
+  serviceName: 'redis-cache'
+  template:
+    metadata:
+      labels:
+        app: redis
+        instance: cache
+    spec:
+      containers:
+      - image: redis:alpine3.20
+        imagePullPolicy: IfNotPresent
+        name: redis
+        command: [ "redis-server" ]
+        args: [ "/etc/redis/redis.conf" ]
+        ports:
+        - containerPort: 6379
+          name: redis
+          protocol: TCP
+        env:
+        - name: MASTER
+          value: 'true'
+        volumeMounts:
+        - mountPath: /etc/redis/redis.conf
+          name: conf
+          subPath: redis.conf
+          readOnly: true
+        # Not limiting resources, using the default of the namespace
+        securityContext:
+          privileged: false
+          allowPrivilegeEscalation: false
+          runAsUser: 65210
+          runAsGroup: 65210
+          capabilities:
+            drop:
+            - ALL
+      dnsPolicy: ClusterFirst
+      securityContext:
+        fsGroup: 65210
+        runAsUser: 65210
+        runAsGroup: 65210
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - name: conf
+        configMap:
+          name: redis-cache
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-cache
+  namespace: default
+data:
+  redis.conf: |
+    dir /tmp/
+    save ""
+    appendonly no
+---
+kind: Service 
+apiVersion: v1 
+metadata:
+  name: redis-cache
+  namespace: default
+spec:
+  type: ClusterIP 
+  selector:
+    app: redis
+    instance: cache
+  ports:
+    - port: 6379
+      targetPort: redis

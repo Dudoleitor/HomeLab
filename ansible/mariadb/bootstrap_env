@@ -1,0 +1,14 @@
+#!/bin/bash
+
+arg=$1
+
+if [ $arg = "set" ]; then
+    if grep -Fxq "safe_to_bootstrap: 1" /var/lib/mysql/grastate.dat; then
+        systemctl set-environment _WSREP_NEW_CLUSTER='--wsrep-new-cluster'
+    fi
+elif [ $arg = "unset" ]; then
+    systemctl set-environment _WSREP_NEW_CLUSTER=''
+else
+    echo "Wrong usage, please pass set or unset as argument"
+    exit 1
+fi

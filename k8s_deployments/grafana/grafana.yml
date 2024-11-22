@@ -1,0 +1,216 @@
+# This deployment implements a dashboard for analytics.
+#
+# --> Before applying the deployment, a persistent volume has to be created:
+# in Longhorn (through the GUI) create a volume 'grafana' (100Mi RWX) and the relative PVC;
+#
+# --> Before applying the deployment, SSL certificates need to be created in the namespace 'default':
+# - the certificate is mantained through cert-manager, the secret name is 'carlotto-wildcard',
+# be sure that cert-manager is properly configured.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  annotations:
+    field.cattle.io/description: Grafana, dashboard for analytics
+  namespace: monitoring
+spec:
+  replicas: 1
+  strategy: 
+    type: Recreate
+  revisionHistoryLimit: 0  # Cleaning up all old replicasets
+  selector: 
+    matchLabels: 
+     app: grafana 
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      priorityClassName: lower-priority-1000
+      containers:
+        - image: grafana/grafana:latest
+          imagePullPolicy: IfNotPresent
+          name: grafana
+          ports:
+            - containerPort: 3000
+              name: grafana-ui
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /var/lib/grafana
+              name: grafana-storage
+            - mountPath: /etc/grafana/provisioning/datasources/mcm-prometheus.yaml
+              name: grafana-ds
+              subPath: mcm-prometheus.yaml
+              readOnly: true
+            - mountPath: /etc/ssl/certs/ca-certificates.crt
+              name: certs-store
+              subPath: ca-certificates.crt
+              readOnly: true
+          env:
+          - name: TZ
+            value: 'Europe/Rome'
+          - name: GF_SERVER_ROOT_URL
+            value: 'https://graphs.carl-otto.it/'
+          resources:  # Limiting resources is always better, adjust accordingly
+            limits:
+              cpu: 250m
+              memory: 512Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            runAsUser: 65220
+            runAsGroup: 65220
+            capabilities:
+              drop:
+              - ALL
+          readinessProbe:
+            httpGet:
+              port: grafana-ui
+              path: /
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              port: grafana-ui
+              path: /
+            initialDelaySeconds: 15
+            periodSeconds: 20
+      dnsPolicy: ClusterFirst
+      securityContext:
+        fsGroup: 65220
+        runAsUser: 65220
+        runAsGroup: 65220
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      terminationGracePeriodSeconds: 30
+      volumes:
+        - name: grafana-storage
+          persistentVolumeClaim:
+            claimName: grafana  # Needs to be created manually in longhorn
+        - name: grafana-ds
+          configMap:
+            name: grafana-datasources
+        - name: certs-store
+          hostPath:
+            path: /etc/ssl/certs
+---
+kind: Service 
+apiVersion: v1 
+metadata:
+  name: grafana
+  namespace: monitoring
+spec:
+  type: ClusterIP
+  selector:
+    app: grafana
+  ports:
+    - port: 80
+      targetPort: grafana-ui
+      name: http
+# There will be two different ingresses to handle requests coming to the internal traefik ingress and to th
+# external traefik ingress.
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    # This configuration will reject http requests, the redirect ingress below is needed to handle those
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    traefik.ingress.kubernetes.io/router.middlewares: default-hstsxssin@kubernetescrd
+  name: grafana-in
+  namespace: monitoring
+spec:
+  rules:
+  - host: graphs.carl-otto.it  # Add DNS entry for this domain to the ingress IP (primary or secondary)
+    http:
+      paths:
+      - backend:
+          service:
+            name: grafana
+            port:
+              number: 80
+        path: /
+        pathType: ImplementationSpecific
+  tls:
+  - secretName: carlotto-grafana  # Be sure that cert-manager has been configured
+    hosts:
+    - graphs.carl-otto.it
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    # This configuration will reject http requests, the redirect ingress below is needed to handle those
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    traefik.ingress.kubernetes.io/router.middlewares: default-hstsxssext@kubernetescrd,default-robotsext@kubernetescrd
+    kubernetes.io/ingress.class: traefik-external
+  labels:
+    traffic-type: external
+  name: grafana-ext
+  namespace: monitoring
+spec:
+  rules:
+  - host: graphs.carl-otto.it  # Add DNS entry for this domain in the cloudflare dashboard
+    http:
+      paths:
+      - backend:
+          service:
+            name: grafana
+            port:
+              number: 80
+        path: /
+        pathType: ImplementationSpecific
+  tls:
+  - secretName: carlotto-grafana  # Be sure that cert-manager has been configured
+    hosts:
+    - graphs.carl-otto.it
+---
+# This secondary ingress is needed to properly redirect http requests to https
+# The middleware 'redirect' needs to be deployed in the namespace 'default', check traefik-midd-httpred.yml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: grafana-in-redirect
+  namespace: monitoring
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web  # <namespace>-<middleware>@kubernetescrd
+    traefik.ingress.kubernetes.io/router.middlewares: default-redirect@kubernetescrd
+spec:
+  rules:
+    - host: graphs.carl-otto.it
+      http:
+        paths:
+          - backend:
+              service:
+                name: grafana
+                port:
+                  number: 80
+            path: /
+            pathType: ImplementationSpecific
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: monitoring
+data:
+  mcm-prometheus.yaml: |-
+    {
+        "apiVersion": 1,
+        "datasources": [
+            {
+                "editable": false,
+                "name": "mcm",
+                "orgId": 2,
+                "type": "prometheus",
+                "url": "http://mcm-prom.local.dudoleitor.com:9090",
+                "version": 1
+            }
+        ]
+    }
+

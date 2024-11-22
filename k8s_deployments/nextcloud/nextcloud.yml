@@ -1,0 +1,667 @@
+# This deployment implements a php backend server and an nginx server to host nextcloud.
+# This deployment depends on redis for caching purposes, ensure it's up and running
+# 
+# --> Before applying the deployment, a persistent volume has to be created:
+# in Longhorn (through the GUI) create a volume 'nextcloud-vol' (2Gi RWX) and the relative PVC;
+# since the container runs with user 65200, you need to mount the volume using a temp shell
+# and chown 65200:65200 the volume root directory.
+#
+# --> Before applying the deployment, check the ingresses to ensure each middleware is available.
+#
+# The files are mounted by the host using kubernetes, everything is transparent to nextcloud.
+# Each user's home is mounted separately to avoid having cache files on the NAS.
+#
+# --> Be sure to disable the 'Versions' apps, as the folder files_versions is not mounted 
+# (the pod would run out of space).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: php-fpm
+  annotations:
+    field.cattle.io/description: php fpm backend
+  namespace: default
+spec:
+  replicas: 4
+  strategy: 
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+  revisionHistoryLimit: 0  # Cleaning up all old replicasets
+  selector: 
+    matchLabels: 
+     app: php-fpm
+     service: nextcloud
+  template:
+    metadata:
+      labels:
+        app: php-fpm
+        service: nextcloud
+    spec:
+      containers:
+      - image: internal-repo.local.dudoleitor.com:5000/php-fpm-82:v0.0.2   # https://faun.pub/nextcloud-scale-out-using-kubernetes-93c9cac9e493
+        imagePullPolicy: IfNotPresent
+        name: php-fpm-82
+        ports:
+        - containerPort: 9000
+          name: fpm
+          protocol: TCP
+        volumeMounts:  # Remeber to updates mounts to cronjobs too
+        - mountPath: /var/www/html
+          name: webroot
+        - mountPath: /usr/local/etc/php/conf.d/logging.ini
+          name: confs
+          subPath: logging.ini
+          readOnly: true
+        - mountPath: /usr/local/etc/php/conf.d/nextcloud.ini
+          name: confs
+          subPath: nextcloud.ini
+          readOnly: true
+        - mountPath: /usr/local/etc/php/conf.d/redis-session.ini
+          name: confs
+          subPath: redis-session.ini
+          readOnly: true
+        - mountPath: /usr/local/etc/php/conf.d/performance-tuning.ini
+          name: confs
+          subPath: performance-tuning.ini
+          readOnly: true
+        - mountPath: /etc/ssl/certs/ca-certificates.crt
+          name: certs-store
+          subPath: ca-certificates.crt
+          readOnly: true
+        - mountPath: /dev/urandom  # Needed to improve random numbers generation
+          name: urandom
+          readOnly: true
+        - mountPath: /tmp
+          name: cache-tmp
+          subPath: tmp
+        # We are mounting each user folder separately
+        # Create the user in the GUI and then apply this deployment        
+        - mountPath: /var/www/html/nextcloud/data/edoardo/files
+          name: nfs-homes
+          subPath: edoardo
+        - mountPath: /var/www/html/nextcloud/data/edoardo/files_trashbin
+          name: nfs-trash
+          subPath: edoardo
+
+        - mountPath: /mnt/shared-videos
+          name: nfs-videos
+        - mountPath: /mnt/shared-docs
+          name: nfs-docs
+        - mountPath: /mnt/shared-photos
+          name: nfs-photos
+        resources:  # Limiting resources is always better, adjust accordingly
+          limits:
+            cpu: 500m
+            memory: 1024Mi  # Match with configmap, nextcloud.ini
+          requests:
+            cpu: 200m
+            memory: 512Mi
+        securityContext:
+          privileged: false
+          allowPrivilegeEscalation: false
+          runAsUser: 65200
+          runAsGroup: 65200
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        livenessProbe:
+          failureThreshold: 10
+          initialDelaySeconds: 200
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 1
+          tcpSocket:
+            port: fpm
+        readinessProbe:
+          failureThreshold: 3
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 1
+          tcpSocket:
+            port: fpm
+      dnsPolicy: ClusterFirst
+      securityContext:
+        fsGroup: 65200
+        supplementalGroups: [100, 993]  # To access the NFS shares
+        runAsUser: 65200
+        runAsGroup: 65200
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      terminationGracePeriodSeconds: 10
+      volumes:
+      - name: webroot
+        persistentVolumeClaim:
+          claimName: nextcloud-vol  # Needs to be created manually in longhorn
+      - name: confs
+        configMap:
+          name: nextcloud-php
+      - name: certs-store
+        hostPath:
+          path: /etc/ssl/certs
+      - name: urandom
+        hostPath:
+          path: /dev/urandom
+      - name: cache-tmp
+        emptyDir: {}
+
+      # Each user folder will be mounted using subPath
+      - name: nfs-homes
+        nfs:
+          path: /homes
+          server: litecoin-internal.local.dudoleitor.com   
+      - name: nfs-trash
+        nfs:
+          path: /k3s-cluster/nextcloud-trash
+          server: litecoin-internal.local.dudoleitor.com
+      - name: nfs-videos
+        nfs:
+          path: /videos
+          server: litecoin-internal.local.dudoleitor.com
+      - name: nfs-docs
+        nfs:
+          path: /documents
+          server: litecoin-internal.local.dudoleitor.com
+      - name: nfs-photos
+        nfs:
+          path: /photos
+          server: litecoin-internal.local.dudoleitor.com
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nextcloud-php
+  namespace: default
+data:
+  logging.ini: |
+    error_log=/proc/self/fd/2
+    log_level = warning
+    log_errors=On
+    display_errors=Off
+    error_reporting = E_ALL & ~E_DEPRECATED & ~E_STRICT
+  nextcloud.ini: |
+    memory_limit = 1024M
+
+    ; To comply with cloudflare's 100MB upload limit
+    post_max_size = 100M
+    upload_max_filesize = 100M
+
+    file_uploads = On
+    max_file_uploads = 500
+
+    ; To use apc as local cache
+    apc.enable_cli = 1
+
+    ; The UI says 8 is not enough
+    opcache.interned_strings_buffer = 10
+
+    ; To improve performance, changes to config.php require a restart
+    opcache.validate_timestamps = 0
+  redis-session.ini: |
+    session.save_handler = redis
+    session.save_path = "tcp://redis-cache.default.svc.cluster.local:6379"
+    redis.session.locking_enabled = 1
+    redis.session.lock_retries = 400
+  performance-tuning.ini: |
+    pm = dynamic
+    pm.max_children = 240
+    pm.start_servers = 24
+    pm.min_spare_servers = 24
+    pm.max_spare_servers = 64
+
+---
+kind: Service 
+apiVersion: v1 
+metadata:
+  name: php-fpm
+  namespace: default
+spec:
+  type: ClusterIP 
+  selector:
+    app: php-fpm
+    service: nextcloud
+  ports:
+  - port: 9000
+    targetPort: 9000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nextcloud-nginx
+  annotations:
+    field.cattle.io/description: nginx frontend for nextcloud
+  namespace: default
+spec:
+  replicas: 4
+  strategy: 
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+  revisionHistoryLimit: 0  # Cleaning up all old replicasets
+  selector: 
+    matchLabels:
+     app: nginx
+     service: nextcloud
+  template:
+    metadata:
+      labels:
+        app: nginx
+        service: nextcloud
+    spec:
+      containers:
+      - image: nginx:alpine
+        imagePullPolicy: IfNotPresent
+        name: nginx-nextcloud
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        volumeMounts:
+        - mountPath: /var/www/html
+          name: webroot
+        - mountPath: /etc/nginx/nginx.conf
+          name: confs
+          subPath: nginx.conf
+          readOnly: true
+        - mountPath: /etc/nginx/conf.d/default.conf
+          name: confs
+          subPath: default.conf
+          readOnly: true
+        - mountPath: /etc/nginx/conf.d/nextcloud.include
+          name: confs
+          subPath: nextcloud.include
+          readOnly: true
+        - mountPath: /etc/ssl/certs/ca-certificates.crt
+          name: certs-store
+          subPath: ca-certificates.crt
+          readOnly: true
+        - mountPath: /var/cache/nginx
+          name: cache-tmp
+          subPath: cache
+        - mountPath: /tmp
+          name: cache-tmp
+          subPath: tmp
+        resources:  # Limiting resources is always better, adjust accordingly
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 125m
+            memory: 256Mi
+        securityContext:
+          privileged: false
+          allowPrivilegeEscalation: false
+          runAsUser: 65200
+          runAsGroup: 65200
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        livenessProbe:
+          failureThreshold: 10
+          initialDelaySeconds: 200
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 1
+          tcpSocket:
+            port: http
+        readinessProbe:
+          failureThreshold: 3
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 1
+          tcpSocket:
+            port: http
+      dnsPolicy: ClusterFirst
+      initContainers:  # To ensure the frontend starts only after the php backend
+      - command:
+        - sh
+        - -c
+        - until nc php-fpm.default.svc.cluster.local 9000; do echo waiting for php-fpm to start;
+          sleep 2; done
+        image: busybox:1.37
+        imagePullPolicy: IfNotPresent
+        name: wait-for-backend
+        resources:
+          limits:
+            memory: 50Mi
+            cpu: 100m
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+      securityContext:
+        fsGroup: 65200
+        runAsUser: 65200
+        runAsGroup: 65200
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      terminationGracePeriodSeconds: 10
+      volumes:
+      - name: webroot
+        persistentVolumeClaim:
+          claimName: nextcloud-vol  # Needs to be created manually in longhorn
+      - name: confs
+        configMap:
+          name: nextcloud-nginx
+      - name: certs-store
+        hostPath:
+          path: /etc/ssl/certs
+      - name: cache-tmp
+        emptyDir: {}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nextcloud-nginx
+  namespace: default
+data:
+  nginx.conf: |
+    worker_processes  auto;
+
+    error_log  /dev/stdout debug;
+    pid        /tmp/nginx.pid;
+
+    events {
+        worker_connections  1024;
+    }
+
+    http {
+        include       /etc/nginx/mime.types;
+        include /etc/nginx/conf.d/default.conf;
+        default_type  application/octet-stream;
+
+        sendfile        on;
+        keepalive_timeout  65;
+
+        #gzip  on;
+        fastcgi_buffers 16 16k; 
+        fastcgi_buffer_size 32k;        
+    }
+  default.conf: |
+    # Set the `immutable` cache control options only for assets with a cache busting `v` argument
+    map $arg_v $asset_immutable {
+        "" "";
+        default ", immutable";
+    }
+    server {
+        listen 8080;
+        root /var/www/html/nextcloud;
+        include /etc/nginx/conf.d/nextcloud.include;
+
+        real_ip_header X-Real-Ip;
+        set_real_ip_from 0.0.0.0/0;
+    }
+  nextcloud.include: |
+      index index.php index.html /index.php$request_uri;
+      #access_log  /dev/stdout;
+
+      add_header Referrer-Policy "no-referrer" always;
+      add_header X-Content-Type-Options "nosniff" always;
+      add_header X-Download-Options "noopen" always;
+      add_header X-Frame-Options "SAMEORIGIN" always;
+      add_header X-Permitted-Cross-Domain-Policies "none" always;
+      add_header X-Robots-Tag "noindex, nofollow" always;
+      fastcgi_hide_header X-Powered-By;
+
+      include mime.types;
+      types {
+        text/javascript js mjs;
+      	application/wasm wasm;
+      }    
+
+      # Strict-Transport-Security and XSS-Protection are managed by traefik
+      # add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+      # add_header X-XSS-Protection "1; mode=block" always;
+
+      # Set max upload size and increase timeout, 100M is a limit for cloudflare
+      client_max_body_size 100M;
+      client_body_timeout 300s;
+      fastcgi_buffers 64 4K;
+      # HTTP2 bandwidth optimization
+      client_body_buffer_size 512k;
+
+
+      # Enable gzip but do not remove ETag headers
+      gzip on;
+      gzip_vary on;
+      gzip_comp_level 4;
+      gzip_min_length 256;
+      gzip_proxied expired no-cache no-store private no_last_modified no_etag auth;
+      gzip_types application/atom+xml application/javascript application/json application/ld+json application/manifest+json application/rss+xml application/vnd.geo+json application/vnd.ms-fontobject application/x-font-ttf application/x-web-app-manifest+json application/xhtml+xml application/xml font/opentype image/bmp image/svg+xml image/x-icon text/cache-manifest text/css text/plain text/vcard text/vnd.rim.location.xloc text/vtt text/x-component text/x-cross-domain-policy;
+
+      location = /robots.txt {
+        allow all;
+        log_not_found off;
+        access_log off;
+      }
+
+      # Make a regex exception for `/.well-known` so that clients can still
+      # access it despite the existence of the regex rule
+      # `location ~ /(\.|autotest|...)` which would otherwise handle requests
+      # for `/.well-known`.
+      location ^~ /.well-known {
+        location = /.well-known/carddav { return 301 /remote.php/dav/; }
+        location = /.well-known/caldav  { return 301 /remote.php/dav/; }
+
+        location /.well-known/acme-challenge    { try_files $uri $uri/ =404; }
+        location /.well-known/pki-validation    { try_files $uri $uri/ =404; }
+
+        # Let Nextcloud's API for `/.well-known` URIs handle all other
+        # requests by passing them to the front-end controller.
+        return 301 /index.php$request_uri;
+      }
+
+      location ~ ^/(?:build|tests|config|lib|3rdparty|templates|data)(?:$|/)  { return 404; }
+      location ~ ^/(?:\.|autotest|occ|issue|indie|db_|console)                { return 404; }
+
+      location ~ \.php(?:$|/) {
+        # Required for legacy support
+        rewrite ^/(?!index|remote|public|cron|core\/ajax\/update|status|ocs\/v[12]|updater\/.+|ocs-provider\/.+|.+\/richdocumentscode\/proxy) /index.php$request_uri;
+
+        fastcgi_pass php-fpm.default.svc.cluster.local:9000;
+        fastcgi_index index.php;
+        
+        fastcgi_split_path_info ^(.+?\.php)(/.*)$;
+        set $path_info $fastcgi_path_info;
+
+        try_files $fastcgi_script_name =404;
+
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_param PATH_INFO $fastcgi_path_info;
+        fastcgi_param HTTPS on;
+        fastcgi_param PATH_TRANSLATED $document_root$fastcgi_path_info;
+        ########
+        fastcgi_read_timeout 86400;
+        # Avoid sending the security headers twice
+        fastcgi_param modHeadersAvailable true;
+        # Enable pretty urls
+        fastcgi_param front_controller_active true;
+
+        #webdav mounts dont work with below
+        #fastcgi_intercept_errors on;
+        fastcgi_request_buffering off;
+
+        fastcgi_pass_request_headers on;
+        fastcgi_max_temp_file_size 0;
+      }
+
+      # Adding the cache control header for js, css and map files
+      # Make sure it is BELOW the PHP block
+      location ~ \.(?:css|js|mjs|svg|gif|png|jpg|ico|wasm|tflite|map|ogg|flac)$ {
+          try_files $uri /index.php$request_uri;
+          add_header Cache-Control                     "public, max-age=15778463$asset_immutable";
+          add_header Referrer-Policy                   "no-referrer"       always;
+          add_header X-Content-Type-Options            "nosniff"           always;
+          add_header X-Frame-Options                   "SAMEORIGIN"        always;
+          add_header X-Permitted-Cross-Domain-Policies "none"              always;
+          add_header X-Robots-Tag                      "noindex, nofollow" always;
+          add_header X-XSS-Protection                  "1; mode=block"     always;
+          access_log off;
+      }
+
+      location ~ \.woff2?$ {
+          try_files $uri /index.php$request_uri;
+          expires 7d;
+          access_log off;
+      }
+
+      location /remote {
+          return 301 /remote.php$request_uri;
+      }
+      location / {
+        try_files $uri $uri/ /index.php$request_uri;
+      }
+
+---
+kind: Service 
+apiVersion: v1 
+metadata:
+  name: nextcloud-nginx
+  namespace: default
+spec:
+  type: ClusterIP 
+  selector:
+    app: nginx
+    service: nextcloud 
+  ports:
+  - port: 80
+    targetPort: http
+# The following regex redirect is needed to properly handle caldav requests
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: nextcloud-caldavin
+  namespace: default
+spec:
+  redirectRegex:
+    regex: ^https://(.*)/.well-known/(card|cal)dav
+    replacement: https://${1}/remote.php/dav/
+    permanent: true
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: nextcloud-webfingerin
+  namespace: default
+spec:
+  redirectRegex:
+    regex: ^https://(.*[^index.php])/.well-known/(webfinger|nodeinfo)
+    replacement: https://${1}/index.php/.well-known/${2}
+    permanent: true
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: nextcloud-caldavext
+  namespace: default
+  annotations:
+    kubernetes.io/ingress.class: traefik-external
+  labels:
+    traffic-type: external
+spec:
+  redirectRegex:
+    regex: ^https://(.*)/.well-known/(card|cal)dav
+    replacement: https://${1}/remote.php/dav/
+    permanent: true
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: nextcloud-webfingerext
+  namespace: default
+  annotations:
+    kubernetes.io/ingress.class: traefik-external
+  labels:
+    traffic-type: external
+spec:
+  redirectRegex:
+    regex: ^https://(.*[^index.php])/.well-known/(webfinger|nodeinfo)
+    replacement: https://${1}/index.php/.well-known/${2}
+    permanent: true
+# There will be two different ingresses to handle requests coming to the internal traefik ingress and to the
+# external traefik ingress.
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    # This configuration will reject http requests, the redirect ingress below is needed to handle those
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    traefik.ingress.kubernetes.io/router.middlewares: default-hstsxssin@kubernetescrd,default-nextcloud-caldavin@kubernetescrd,default-nextcloud-webfingerin@kubernetescrd
+  name: nextcloud-in
+  namespace: default
+spec:
+  rules:
+  - host: cloud.carl-otto.it  # Add DNS entry for this domain to the ingress IP (primary or secondary)
+    http:
+      paths:
+      - backend:
+          service:
+            name: nextcloud-nginx
+            port:
+              number: 80
+        path: /
+        pathType: ImplementationSpecific
+  tls:
+  - secretName: carlotto-wildcard  # Be sure that cert-manager has been configured
+    hosts:
+    - 'cloud.carl-otto.it'
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    # This configuration will reject http requests, the redirect ingress below is needed to handle those
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    traefik.ingress.kubernetes.io/router.middlewares: default-hstsxssext@kubernetescrd,default-nextcloud-caldavext@kubernetescrd,default-nextcloud-webfingerext@kubernetescrd,default-robotsext@kubernetescrd
+    kubernetes.io/ingress.class: traefik-external
+  labels:
+    traffic-type: external
+  name: nextcloud-ext
+  namespace: default
+spec:
+  rules:
+  - host: cloud.carl-otto.it  # Add DNS entry for this domain to the ingress IP (primary or secondary)
+    http:
+      paths:
+      - backend:
+          service:
+            name: nextcloud-nginx
+            port:
+              number: 80
+        path: /
+        pathType: ImplementationSpecific
+  tls:
+  - secretName: carlotto-wildcard  # Be sure that cert-manager has been configured
+    hosts:
+    - 'cloud.carl-otto.it'
+---
+# This secondary ingress is needed to properly redirect http requests to https
+# The middleware 'redirect' needs to be deployed in the namespace 'default', check traefik-midd-httpred.yml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nextcloud-in-redirect
+  namespace: default
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web  # <namespace>-<middleware>@kubernetescrd
+    traefik.ingress.kubernetes.io/router.middlewares: default-redirect@kubernetescrd,default-nextcloud-caldavin@kubernetescrd,default-nextcloud-webfingerin@kubernetescrd
+spec:
+  rules:
+    - host: cloud.carl-otto.it
+      http:
+        paths:
+          - backend:
+              service:
+                name: nextcloud-nginx
+                port:
+                  number: 80
+            path: /
+            pathType: ImplementationSpecific

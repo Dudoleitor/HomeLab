@@ -1,0 +1,164 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: modsecurity
+  name: modsecurity
+  namespace: crowdsec
+spec:
+  progressDeadlineSeconds: 60
+  replicas: 2
+  revisionHistoryLimit: 0
+  selector:
+    matchLabels:
+      app: modsecurity
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+  template:
+    metadata:
+      labels:
+        app: modsecurity
+    spec:
+      priorityClassName: higher-priority-2000
+      containers:
+      - image: owasp/modsecurity-crs:4.3.0-apache-alpine-202406090906
+        imagePullPolicy: IfNotPresent
+        name: modsecurity
+        env:
+        - name: ANOMALY_INBOUND
+          value: '6'
+        - name: ANOMALY_OUTBOUND
+          value: '5'
+        - name: BACKEND
+          value: 'http://dummy'
+        - name: REPORTING_LEVEL
+          value: '2'
+        - name: MODSEC_RULE_ENGINE
+          value: 'On'
+        - name: SSL_ENGINE
+          value: 'Off'
+        - name: LOGLEVEL
+          value: 'warn'
+        ports:
+        - containerPort: 8080
+          name: waf
+          protocol: TCP
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        securityContext:
+          privileged: false
+          allowPrivilegeEscalation: false
+          # runAsUser: 65427
+          # runAsGroup: 65427
+          capabilities:
+            drop:
+            - ALL
+          # readOnlyRootFilesystem: true
+        readinessProbe:
+          httpGet:
+            port: waf
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            port: waf
+          initialDelaySeconds: 20
+          periodSeconds: 10
+      dnsPolicy: ClusterFirst
+      # securityContext:
+      #   fsGroup: 65427
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      terminationGracePeriodSeconds: 3
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: modsecurity
+  namespace: crowdsec
+spec:
+  type: ClusterIP
+  selector:
+    app: modsecurity
+  ports:
+    - port: 80
+      targetPort: waf
+      name: waf
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: whoami
+  name: whoami
+  namespace: crowdsec
+spec:
+  progressDeadlineSeconds: 60
+  replicas: 1  # Only one replica needed
+  revisionHistoryLimit: 0
+  selector:
+    matchLabels:
+      app: whoami
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+  template:
+    metadata:
+      labels:
+        app: whoami
+    spec:
+      priorityClassName: higher-priority-2000
+      containers:
+      - image: traefik/whoami:latest
+        imagePullPolicy: IfNotPresent
+        name: whoami
+        env:
+        - name: WHOAMI_PORT_NUMBER
+          value: '8080'
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        resources:  # Limiting resources is always better, adjust accordingly
+          limits:
+            cpu: 10m
+            memory: 32Mi
+          requests:
+            cpu: 5m
+            memory: 8Mi
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        securityContext:
+          privileged: false
+          allowPrivilegeEscalation: false
+          runAsUser: 65427
+          runAsGroup: 65427
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+      dnsPolicy: ClusterFirst
+      securityContext:
+        fsGroup: 65427
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      terminationGracePeriodSeconds: 3
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: dummy
+  namespace: crowdsec
+spec:
+  type: ClusterIP
+  selector:
+    app: whoami
+  ports:
+    - port: 80
+      targetPort: http
+      name: http

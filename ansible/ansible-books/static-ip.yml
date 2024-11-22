@@ -1,0 +1,64 @@
+- hosts: --redacted--
+  become: yes
+  gather_facts: no
+  tasks:
+  - name: Remove IPv6 disable flags if needed
+    lineinfile:
+      dest: '/etc/sysctl.conf'
+      line: "{{ item }}"
+      state: absent
+    loop: ['net.ipv6.conf.all.disable_ipv6 = 1',
+      'net.ipv6.conf.default.disable_ipv6 = 1',
+      'net.ipv6.conf.lo.disable_ipv6 = 1']
+    register: sysctl
+    when: not (disable_ipv6 is defined) or not disable_ipv6
+  - name: Enable IPv6 if needed
+    command: sysctl {{ item }}
+    loop: ['net.ipv6.conf.all.disable_ipv6=0',
+      'net.ipv6.conf.default.disable_ipv6=0',
+      'net.ipv6.conf.lo.disable_ipv6=0']
+    when: sysctl.changed
+
+  - name: Apply IPv6 token for primary network interface, if needed
+    command: /sbin/ip token set {{ nic1_ipv6_token }} dev {{ nic1_name }}
+    when: nic1_ipv6_token is defined and (not (disable_ipv6 is defined) or not disable_ipv6) and sysctl.changed
+  - name: Apply IPv6 token for secondary network interface, if needed
+    command: /sbin/ip token set {{ nic2_ipv6_token }} dev {{ nic2_name }}
+    when: nic2_ipv6_token is defined and (not (disable_ipv6 is defined) or not disable_ipv6) and sysctl.changed
+
+  - name: Apply the main interface configuration
+    copy:
+      src: /home/dudoleitor/ansible/static-ip/interfaces
+      dest: /etc/network/interfaces
+      mode: 0644
+      force: yes
+    register: interfaces_changed
+  - name: Apply configuration for the primary network interface
+    template:
+      src: /home/dudoleitor/ansible/static-ip/nic1
+      dest: /etc/network/interfaces.d/{{ nic1_name }}
+      mode: 0644
+      force: yes
+    register: nic1_changed
+  - name: Apply configuration for the secondary network interface
+    template:
+      src: /home/dudoleitor/ansible/static-ip/nic2
+      dest: /etc/network/interfaces.d/{{ nic2_name }}
+      mode: 0644
+      force: yes
+    register: nic2_changed
+    when: nic2_name is defined and nic2_ip is defined
+  
+  - name: Restart networking, if needed
+    service:
+      name: networking
+      state: restarted
+    when: interfaces_changed.changed or nic1_changed.changed or nic2_changed.changed
+
+  - name: Set resolv.conf
+    template:
+      src: /home/dudoleitor/ansible/static-ip/resolv.conf
+      dest: /etc/resolv.conf
+      mode: 0644
+      force: yes
+    register: resolv_changed

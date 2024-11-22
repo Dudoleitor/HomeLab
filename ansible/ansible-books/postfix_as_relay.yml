@@ -1,0 +1,100 @@
+---
+- hosts: --redacted--
+  become: true
+  gather_facts: no
+
+  tasks: 
+    - name: Set postfix option type as internet site
+      debconf: 
+        name=postfix 
+        question="postfix/main_mailer_type" 
+        value="'Internet Site'" 
+        vtype="string"
+
+    - name: Install postfix using apt
+      apt: name=postfix state=latest update_cache=yes force_apt_get=yes
+    
+    - name: Insert relay configuration into main.cf
+      lineinfile:
+        path: /etc/postfix/main.cf
+        state: present
+        regexp: "{{ item.toFind }}"
+        line: "{{ item.toPut }}"
+      loop:
+      - {toFind: 'relayhost', toPut: 'relayhost = [relay-smtp.dudoleitor.com]:587'}
+      - {toFind: 'smtp_use_tls', toPut: 'smtp_use_tls = yes'}
+      - {toFind: 'smtp_sasl_auth_enable', toPut: 'smtp_sasl_auth_enable = yes'}
+      - {toFind: 'smtp_sasl_security_options', toPut: 'smtp_sasl_security_options ='}
+      - {toFind: 'smtp_sasl_password_maps', toPut: 'smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd'}
+      - {toFind: 'sender_canonical_classes', toPut: 'sender_canonical_classes = envelope_sender, header_sender'}
+      - {toFind: 'sender_canonical_maps', toPut: 'sender_canonical_maps =  regexp:/etc/postfix/sender_canonical_maps'}
+      - {toFind: 'smtp_header_checks', toPut: 'smtp_header_checks = regexp:/etc/postfix/header_check'}
+      - {toFind: 'virtual_alias_maps', toPut: 'virtual_alias_maps = hash:/etc/postfix/virtual_alias'}
+      register: main_cf
+
+    - name: Configure sender_canonical_maps
+      copy:
+        dest: /etc/postfix/sender_canonical_maps
+        content: |
+          /.+/    noreply@dudoleitor.com
+      register: sender_canonical_maps
+    - name: Configure header_check
+      copy:
+        dest: /etc/postfix/header_check
+        content: |
+          /From:(.*)/i REPLACE From: {{ postfix_from }} <noreply@dudoleitor.com>
+      register: header_check
+    - name: Upload sasl_passwd
+      copy:
+        dest: /etc/postfix/sasl_passwd.tmp
+        content: |
+          [relay-smtp.dudoleitor.com]:587 user:PASSWORD_PLACEHOLDER
+      changed_when: False
+    - name: Insert sasl password
+      replace:
+        path: /etc/postfix/sasl_passwd.tmp
+        regexp: 'PASSWORD_PLACEHOLDER'
+        replace: '{{ postfix_debiannodes_password }}'
+      changed_when: False
+    - name: Copy sasl_passwd
+      copy:
+        src: /etc/postfix/sasl_passwd.tmp
+        dest: /etc/postfix/sasl_passwd
+        force: yes
+        remote_src: yes
+      register: sasl_passwd
+    - name: Temporary config cleanup
+      file:
+        path: /etc/postfix/sasl_passwd.tmp
+        state: absent
+      changed_when: False
+    - name: Configure virtual_alias
+      copy:
+        dest: /etc/postfix/virtual_alias
+        content: |
+          noreply@dudoleitor.com          dudoleitor@dudoleitor.com
+      register: virtual_alias
+
+    - name: Hashing config with postmap if needed
+      shell:
+        cmd: "{{ item }}"
+      with_items:
+      - 'postmap hash:/etc/postfix/sasl_passwd'
+      - 'postmap hash:/etc/postfix/virtual_alias'
+      when: sasl_passwd.changed or virtual_alias.changed
+    - name: Secureing sasl_passwd
+      file:
+        path: /etc/postfix/sasl_passwd
+        mode: 0600
+    - name: Secureing sasl_passwd.db
+      file:
+        path: /etc/postfix/sasl_passwd.db
+        owner: root
+        group: postfix
+        mode: 0640
+
+    - name: Restart postfix if needed
+      service:
+        name: postfix
+        state: restarted
+      when: main_cf.changed or sender_canonical_maps.changed or header_check.changed or sasl_passwd.changed or virtual_alias.changed

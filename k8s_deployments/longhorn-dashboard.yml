@@ -1,0 +1,40 @@
+---
+kind: Service 
+apiVersion: v1 
+metadata:
+  name: longhorn-dashboard
+  namespace: longhorn-system
+spec:
+  type: ClusterIP
+  selector:
+    app: longhorn-ui
+  ports:
+    - port: 80
+      targetPort: 8000
+      name: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    # This configuration will reject http requests, the redirect ingress below is needed to handle those
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.middlewares: default-lan-whitelist@kubernetescrd,kube-system-autheliain@kubernetescrd
+  name: longhorn-dashboard
+  namespace: longhorn-system
+spec:
+  rules:
+  - host: longhorn.local.dudoleitor.com  # Add DNS entry for this domain to the ingress IP (primary or secondary)
+    http:
+      paths:
+      - backend:
+          service:
+            name: longhorn-dashboard
+            port:
+              number: 80
+        path: /
+        pathType: ImplementationSpecific
+  tls:
+  - hosts:
+    - longhorn.local.dudoleitor.com
+    secretName: dudoleitor-longhorn  # Manged by cert-manager

@@ -1,0 +1,27 @@
+# This deployment implements a simple middleware for traefik to redirect
+# http requests to https. 
+# Check 'uptime-kuma.yml' for an example of the usage
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: redirect
+  namespace: default
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true
+# ---
+# apiVersion: traefik.io/v1alpha1
+# kind: Middleware
+# metadata:
+#   name: redirectext
+#   namespace: default
+#   labels:
+#     traffic-type: external  # To be detected by the external proxy
+#   annotations:
+#     kubernetes.io/ingress.class: traefik-external
+# spec:
+#   redirectScheme:
+#     scheme: https
+#     permanent: true

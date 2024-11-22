@@ -1,0 +1,260 @@
+# This deployment implements vaultwarden, the password manager
+# 
+# --> Before applying the deployment, a persistent volume has to be created:
+# in Longhorn (through the GUI) create a volume 'vaultwarden' (1Gi RWO) and the relative PVC;
+# since the container runs with user 912, you need to mount the volume using a temp shell
+# and chown 912:912 the volume root directory.
+#
+# --> Before applying the deployment, SSL certificate needs to be created in the namespace 'default':
+# - the certificate is mantained through cert-manager, the secret name is 'carlotto-wildcard',
+# be sure that cert-manager is properly configured.
+#
+# --> Before applying the deployment, a secret with the needed credentials has to be
+# created.
+# kubectl create secret generic vaultwarden-creds
+#  --from-literal=smtp-username=user --from-literal=smtp-password=pass
+#  --from-literal=mysql-url=mysql://user:pass@ip:port/db
+#  --from-literal=admin-token=token
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vaultwarden
+  annotations:
+    field.cattle.io/description: vaultwarden, the password manager
+  namespace: default
+spec:
+  replicas: 2
+  strategy: 
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+  revisionHistoryLimit: 0  # Cleaning up all old replicasets
+  selector: 
+    matchLabels: 
+     app: vaultwarden 
+  template:
+    metadata:
+      labels:
+        app: vaultwarden
+    spec:
+      containers:
+        - image: vaultwarden/server:1.32.4-alpine   # https://github.com/dani-garcia/vaultwarden
+          imagePullPolicy: IfNotPresent
+          name: vaultwarden
+          ports:
+            - containerPort: 8080
+              name: vaultwarden-ui
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /data
+              name: vaultwarden-vol
+            - mountPath: /etc/ssl/certs/ca-certificates.crt
+              name: certs-store
+              subPath: ca-certificates.crt
+              readOnly: true
+          env:
+          - name: TZ
+            value: 'Europe/Rome'
+          - name: ROCKET_PORT
+            value: '8080'
+          - name: DATABASE_URL  # Be sure the IP is allowed in the network policy
+            valueFrom:
+              secretKeyRef:
+                name: vaultwarden-creds
+                key: mysql-url
+          # - name: ADMIN_TOKEN
+          #   valueFrom:
+          #     secretKeyRef:
+          #       name: vaultwarden-creds
+          #       key: admin-token
+          - name: SENDS_ALLOWED
+            value: 'false'
+          - name: USER_ATTACHMENT_LIMIT
+            value: '0'
+          - name: ORG_ATTACHMENT_LIMIT
+            value: '0'
+          - name: EMERGENCY_ACCESS_ALLOWED
+            value: 'false'
+          - name: ORG_CREATION_USERS
+            value: 'edoardo@carl-otto.it'
+          - name: SHOW_PASSWORD_HINT
+            value: 'false'
+          - name: DOMAIN
+            value: 'https://password.carl-otto.it'
+          - name: LOGIN_RATELIMIT_SECONDS
+            value: '60'
+          - name: LOGIN_RATELIMIT_MAX_BURST
+            value: '5'
+          - name: SMTP_HOST  # Be sure the IP is allowed in the network policy
+            value: 'smtp.dudoleitor.com'
+          - name: SMTP_FROM
+            value: 'noreply@dudoleitor.com'
+          - name: SMTP_FROM_NAME
+            value: 'Password vault'
+          - name: SMTP_SECURITY
+            value: 'starttls'
+          - name: SMTP_PORT
+            value: '587'
+          - name: SMTP_USERNAME
+            valueFrom:
+              secretKeyRef:
+                name: vaultwarden-creds
+                key: smtp-username
+          - name: SMTP_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: vaultwarden-creds
+                key: smtp-password
+          - name: SIGNUPS_ALLOWED
+            value: 'false'
+          - name: PUSH_ENABLED
+            value: 'true'
+          - name: PUSH_INSTALLATION_ID
+            valueFrom:
+              secretKeyRef:
+                name: vaultwarden-creds
+                key: installation-id
+          - name: PUSH_INSTALLATION_KEY
+            valueFrom:
+              secretKeyRef:
+                name: vaultwarden-creds
+                key: installation-key
+          resources:  # Limiting resources is always better, adjust accordingly
+            limits:
+              cpu: 750m
+              memory: 768Mi
+            requests:
+              cpu: 125m
+              memory: 256Mi
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            runAsUser: 912
+            runAsGroup: 912
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: true
+          readinessProbe:
+            httpGet:
+              port: vaultwarden-ui
+              path: /
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              port: vaultwarden-ui
+              path: /
+            initialDelaySeconds: 15
+            periodSeconds: 20
+      dnsPolicy: ClusterFirst
+      securityContext:
+        fsGroup: 912
+        runAsUser: 912
+        runAsGroup: 912
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      terminationGracePeriodSeconds: 30
+      volumes:
+        - name: vaultwarden-vol
+          persistentVolumeClaim:
+            claimName: vaultwarden-v2  # Needs to be created manually in longhorn
+        - name: certs-store
+          hostPath:
+            path: /etc/ssl/certs
+---
+kind: Service 
+apiVersion: v1 
+metadata:
+  name: vaultwarden-svc
+  namespace: default
+spec:
+  type: ClusterIP 
+  selector:
+    app: vaultwarden 
+  ports:
+    - port: 80
+      targetPort: 8080
+# There will be two different ingresses to handle requests coming to the internal traefik ingress and to th
+# external traefik ingress.
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    # This configuration will reject http requests, the redirect ingress below is needed to handle those
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    traefik.ingress.kubernetes.io/router.middlewares: default-hstsxssin@kubernetescrd,default-robotsin@kubernetescrd
+  name: vaultwarden-in
+  namespace: default
+spec:
+  rules:
+  - host: password.carl-otto.it  # Add DNS entry for this domain to the ingress IP (primary or secondary)
+    http:
+      paths:
+      - backend:
+          service:
+            name: vaultwarden-svc
+            port:
+              number: 80
+        path: /
+        pathType: ImplementationSpecific
+  tls:
+  - secretName: carlotto-wildcard  # Be sure that cert-manager has been configured
+    hosts:
+    - password.carl-otto.it
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    # This configuration will reject http requests, the redirect ingress below is needed to handle those
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    traefik.ingress.kubernetes.io/router.middlewares: default-hstsxssext@kubernetescrd,default-robotsext@kubernetescrd
+    kubernetes.io/ingress.class: traefik-external
+  labels:
+    traffic-type: external
+  name: vaultwarden-ext
+  namespace: default
+spec:
+  rules:
+  - host: password.carl-otto.it  # Add DNS entry for this domain to the ingress IP (primary or secondary)
+    http:
+      paths:
+      - backend:
+          service:
+            name: vaultwarden-svc
+            port:
+              number: 80
+        path: /
+        pathType: ImplementationSpecific
+  tls:
+  - secretName: carlotto-wildcard  # Be sure that cert-manager has been configured
+    hosts:
+    - 'password.carl-otto.it'
+---
+# This secondary ingress is needed to properly redirect http requests to https
+# The middleware 'redirect' needs to be deployed in the namespace 'default', check traefik-midd-httpred.yml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vaultwarden-in-redirect
+  namespace: default
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web  # <namespace>-<middleware>@kubernetescrd
+    traefik.ingress.kubernetes.io/router.middlewares: default-redirect@kubernetescrd
+spec:
+  rules:
+    - host: password.carl-otto.it
+      http:
+        paths:
+          - backend:
+              service:
+                name: vaultwarden-svc
+                port:
+                  number: 80
+            path: /
+            pathType: ImplementationSpecific

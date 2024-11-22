@@ -1,0 +1,147 @@
+- hosts: --redacted--
+  become: yes
+  gather_facts: no
+  tasks:
+  - name: Install Nginx
+    apt:
+      name: nginx
+      state: present
+      update_cache: yes
+
+  - name: Remove default Nginx configuration
+    file:
+      path: /etc/nginx/sites-enabled/default
+      state: absent
+  
+  - name: Create folder for SSL certificates
+    file:
+      path: /etc/nginx/certs
+      state: directory
+      mode: 0755
+      owner: root
+      group: root
+  - name: Upload SSL certificate
+    copy:
+      src: /home/dudoleitor/.acme.sh/domain.com/domain.com.cer
+      dest: /etc/nginx/certs/domain.com.crt
+      mode: 0644
+      force: no
+    notify: Restart Nginx
+  - name: Upload SSL key
+    copy:
+      src: /home/dudoleitor/.acme.sh/domain.com/domain.com.key
+      dest: /etc/nginx/certs/domain.com.key
+      mode: 0400
+      force: no
+    notify: Restart Nginx
+  
+  - name: Add Nginx reverse proxy configuration
+    copy:
+      src: /home/dudoleitor/ansible/tether/reverse-proxy.conf
+      dest: /etc/nginx/sites-available/reverse-proxy.conf
+    notify: Restart Nginx
+
+  - name: Enable Nginx configuration
+    file:
+      src: /etc/nginx/sites-available/reverse-proxy.conf
+      dest: /etc/nginx/sites-enabled/reverse-proxy.conf
+      state: link
+    notify: Restart Nginx
+
+  - name: Download cloudflared binary
+    get_url:
+      dest: /tmp/cloudflared-latest
+      mode: 0555
+      owner: root
+      group: root
+      url: "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
+    register: cloudflared_download
+  
+  - name: Configure a service for cloudflared
+    copy:
+      src: /home/dudoleitor/ansible/tether/cloudflared.service
+      dest: /lib/systemd/system/cloudflared.service
+  - name: Enable cloudflared service
+    systemd:
+      name: cloudflared
+      enabled: yes
+
+  - name: Upload cloudflared configuration
+    copy:
+      src: /home/dudoleitor/ansible/tether/cloudflared.yml
+      dest: /root/cloudflared-config.yml
+      mode: 0644
+    register: cloudflared_config
+  - name: Upload cloudflared credentials  # Generated with cloudflared tunnel create
+    copy:
+      src: /home/dudoleitor/.cloudflared/tunnel-id.json
+      dest: /root/cloudflared-creds.json
+      mode: 0600
+    register: cloudflared_creds
+  
+  - name: Stop cloudflared service if needed
+    when: cloudflared_download.changed
+    service:
+      name: cloudflared
+      state: stopped
+  - name: Replace cloudflared binary if needed
+    when: cloudflared_download.changed
+    copy:
+      src: /tmp/cloudflared-latest
+      dest: /usr/local/bin/cloudflared
+      mode: 0555
+      owner: root
+      group: root
+      force: yes
+      remote_src: yes
+    notify: Restart cloudflared
+  
+  - meta: flush_handlers
+  
+  - name: Apply cloudflared configuration
+    when: cloudflared_config.changed or cloudflared_creds.changed
+    service:
+      name: cloudflared
+      state: restarted
+
+  - name: Install Certbot
+    apt:
+      name: [certbot, python3-certbot-nginx]
+      state: present
+      update_cache: yes
+
+  - name: Configure certbot
+    shell: >
+      certbot certonly
+      --webroot -w /var/www/html
+      -d domain
+      --email certmaster@carl-otto.it
+      --deploy-hook "systemctl restart nginx"
+      --agree-tos --non-interactive
+    register: certbot
+    changed_when: '"no action taken" not in certbot.stdout'
+    
+  - name: Link certbot certificate to nginx
+    file:
+      src: /etc/letsencrypt/live/domain.com/fullchain.pem
+      dest: /etc/nginx/certs/domain.com.crt
+      state: link
+      force: yes
+    notify: Restart Nginx
+  - name: Link certbot certificate key to nginx
+    file:
+      src: /etc/letsencrypt/live/domain.com/privkey.pem
+      dest: /etc/nginx/certs/domain.com.key
+      state: link
+      force: yes
+    notify: Restart Nginx
+
+  handlers:
+  - name: Restart Nginx
+    systemd:
+      name: nginx
+      state: restarted
+  - name: Restart cloudflared
+    systemd:
+      name: cloudflared
+      state: restarted

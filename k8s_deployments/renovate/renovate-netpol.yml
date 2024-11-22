@@ -1,0 +1,47 @@
+# This Policy ensures that the pod can access only the resources it's meant to
+apiVersion: projectcalico.org/v3
+kind: NetworkPolicy
+metadata:
+  name: renovate
+  namespace: default
+spec:
+  selector: app == 'renovate'
+  ingress:
+  egress:
+  - destination:  # Allowing connections to the dns resolver
+      selector: k8s-app == 'kube-dns'
+      namespaceSelector: kubernetes.io/metadata.name == 'kube-system'
+      ports:
+      - 53
+    protocol: UDP
+    action: Allow
+  - destination:  # Allowing connections to the dns resolver
+      selector: k8s-app == 'kube-dns'
+      namespaceSelector: kubernetes.io/metadata.name == 'kube-system'
+      ports:
+      - 53
+    protocol: TCP
+    action: Allow
+  - destination:  # Allowing connections to the reverse proxy
+      selector: app.kubernetes.io/name == 'traefik'
+      namespaceSelector: kubernetes.io/metadata.name == 'kube-system'
+      ports:
+      - 8443
+    protocol: TCP
+    action: Allow
+  - destination:  # Allowing connections to the internal repository
+      selector: app == 'internal-repo'
+      namespaceSelector: kubernetes.io/metadata.name == 'default'
+      ports:
+      - 5000
+    protocol: TCP
+    action: Allow
+  - destination:  # Blocking connections to LAN
+      selector: lan-blacklist == 'true'
+    action: Deny
+  - destination:  # Allowing connections to the internet
+      ports:
+      - 80
+      - 443
+    protocol: TCP
+    action: Allow

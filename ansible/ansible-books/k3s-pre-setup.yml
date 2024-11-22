@@ -1,0 +1,84 @@
+---
+- hosts: --redacted--
+  become: true
+  gather_facts: yes
+
+  tasks:    
+    - name: Install aptitude using apt
+      apt: name=aptitude state=latest update_cache=yes force_apt_get=yes
+
+    - name: Install required system packages
+      apt: name={{ item }} state=latest update_cache=yes
+      loop: [ 'apt-transport-https', 'ca-certificates', 'curl', 'software-properties-common', 'python3-pip', 'virtualenv', 'python3-setuptools']
+
+    - name: Add Docker GPG apt Key
+      get_url:
+        url: 'https://download.docker.com/linux/ubuntu/gpg'
+        dest: /etc/apt/trusted.gpg.d/docker-apt-keyring.asc
+    - name: Add Docker repository
+      apt_repository: state=present repo={{ item }}
+      loop: ["deb [signed-by=/etc/apt/trusted.gpg.d/docker-apt-keyring.asc] https://download.docker.com/linux/debian {{ ansible_facts['lsb']['codename'] }} stable",]
+
+    - name: Install Docker engine
+      apt: update_cache=yes name={{ item }} state=latest
+      loop: [ 'docker-ce', 'docker-ce-cli', 'containerd.io' ]
+
+    - name: Update hosts file on every node to reach the cluster IP
+      lineinfile:
+        dest: /etc/hosts
+        line: '10.40.10.20     cluster-01.local.dudoleitor.com cluster-01'
+        state: present
+    - name: Update hosts file to reach the internal kubernetes repo
+      lineinfile:
+        dest: /etc/hosts
+        line: '10.40.10.51       internal-repo.local.dudoleitor.com'
+        state: present
+    - name: Update hosts file to reach the nfs storage
+      lineinfile:
+        dest: /etc/hosts
+        line: '10.40.10.10       litecoin-internal.local.dudoleitor.com'
+        state: present
+    - name: Update hosts file to reach mysql-lb
+      lineinfile:
+        dest: /etc/hosts
+        line: '10.40.10.19       mysql-lb.local.dudoleitor.com'
+        state: present
+    - name: Add kernel parameter to avoid ext4-fs errors
+      lineinfile:
+        dest: /etc/default/grub
+        line: 'GRUB_CMDLINE_LINUX_DEFAULT="quiet nvme_core.default_ps_max_latency_us=5500"'
+        regex: '^GRUB_CMDLINE_LINUX_DEFAULT'
+        state: present
+      register: grub
+    - name: Update grub if needed
+      shell: 'update-grub'
+      when: grub.changed
+    
+    - name: Increase max_user_watches for inotify
+      sysctl:
+        name: fs.inotify.max_user_watches
+        value: 262144
+        state: present
+        sysctl_set: yes
+        reload: false
+      register: sysctl1
+    - name: Increase UDP buffer size for QUIC
+      sysctl:
+        name: '{{ item }}'
+        value: 2500000
+        state: present
+        sysctl_set: yes
+        reload: false
+      loop: ['net.core.rmem_max', 'net.core.wmem_max']
+      register: sysctl2
+    - name: Reload sysctl if needed
+      shell: 'sysctl -p'
+      when: sysctl1.changed or sysctl2.changed
+
+- hosts: --redacted--
+  become: true
+  gather_facts: no
+  tasks:
+  - name: Install dependences for longhorn
+    apt: update_cache=yes name={{ item }} state=latest
+    loop: [ 'nfs-common', 'open-iscsi' ]

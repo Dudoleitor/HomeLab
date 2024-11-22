@@ -1,0 +1,129 @@
+---
+- hosts: --redacted--
+  become: true
+  gather_facts: no
+
+  tasks:
+    - name: Enable IPv4 and IPv6 forwarding
+      # Required by calico
+      sysctl:
+        name: "{{ item }}"
+        value: 1
+        state: present
+        sysctl_set: yes
+      loop:
+        - net.ipv4.conf.all.forwarding
+        - net.ipv6.conf.all.forwarding
+    - name: Always accept RA, needed as forwarding is enabled
+      # Required by calico
+      sysctl:
+        name: "{{ item }}"
+        value: 2
+        state: present
+        sysctl_set: yes
+      loop:
+        - net.ipv6.conf.all.accept_ra
+        - net.ipv6.conf.default.accept_ra
+        - net.ipv6.conf.{{ nic1_name }}.accept_ra
+        - net.ipv6.conf.{{ nic2_name }}.accept_ra
+    - name: Download latest k3s installer
+      get_url:
+        dest: /usr/local/bin/k3s-latest
+        mode: 0555
+        owner: root
+        group: root
+        url: "https://get.k3s.io"
+        force: yes
+      register: k3s_download
+      # changed_when: True
+- hosts: --redacted--
+  become: true
+  gather_facts: no
+
+  tasks:
+    - name: Upload kubelet config on first master node
+      copy:
+        dest: /var/lib/kubelet/kubelet.config
+        src: /home/dudoleitor/ansible/kubernetes-agents/kubelet.config
+        force: yes
+    - name: Install k3s on first master node
+      when: k3s_download.changed
+      shell: >
+        sh /usr/local/bin/k3s-latest server
+        --node-taint CriticalAddonsOnly=true:NoExecute
+        --tls-san cluster-01.local.dudoleitor.com
+        --disable servicelb --disable-network-policy --flannel-backend=none
+        --disable traefik
+        --cluster-cidr=10.42.0.0/16,fd42:6cc9:b985::/48
+        --service-cidr=10.43.0.0/16,fd43:68ac:2ade:145b:c781:fab3:e6e0::/108
+        --kube-apiserver-arg=default-unreachable-toleration-seconds=60
+        --kube-apiserver-arg=default-not-ready-toleration-seconds=60
+        --kubelet-arg=config=/var/lib/kubelet/kubelet.config
+        --node-ip {{ nic1_ip }},{{ nic1_ipv6_ula }}{{ nic1_ipv6_token }}
+      environment:
+        K3S_DATASTORE_ENDPOINT: "mysql://{{ k3s_mysql_user }}:{{ k3s_mysql_password }}@tcp({{ mysql_ip }}:3306)/{{ k3s_mysql_db }}"
+# Additional notes:
+# --disable servicelb because we'll be installing metallb as load balancer for external services
+# --cluster-cidr=10.42.0.0/16 to match the config used for calico
+# --node-ip 10.40.10.21 to ensure the correct IP is used for intra-cluster networking
+# --disable-network-policy because we'll be installing calico
+# --flannel-backend=none because calico will run flannel
+# --disable traefik because we'll be manually deploying traefik
+# As vanilla k3s does not support NetworkPolicies, we'll be installing calico.
+## Calico will run on it's own flannel with vxlan, using the interface of the nodeIP for intra-cluster networking.
+
+    - name: Get the cluster token
+      shell: cat /var/lib/rancher/k3s/server/node-token
+      register: k3s_cluster_token
+      changed_when: False
+    - name: Save the cluster token into a dummy host
+      add_host:
+        name: k3s_cluster_token
+        token: "{{ k3s_cluster_token.stdout }}"
+      changed_when: False
+
+- hosts: --redacted--
+  become: true
+  gather_facts: no
+
+  tasks:
+    - name: Upload kubelet config on other master nodes
+      copy:
+        dest: /var/lib/kubelet/kubelet.config
+        src: /home/dudoleitor/ansible/kubernetes-agents/kubelet.config
+    - name: Install k3s on other master nodes
+      when: k3s_download.changed
+      shell: >
+        sh /usr/local/bin/k3s-latest server
+        --node-taint CriticalAddonsOnly=true:NoExecute
+        --tls-san cluster-01.local.dudoleitor.com
+        --disable servicelb --disable-network-policy --flannel-backend=none
+        --disable traefik
+        --cluster-cidr=10.42.0.0/16,fd42:6cc9:b985::/48
+        --service-cidr=10.43.0.0/16,fd43:68ac:2ade:145b:c781:fab3:e6e0::/108
+        --kube-apiserver-arg=default-unreachable-toleration-seconds=60
+        --kube-apiserver-arg=default-not-ready-toleration-seconds=60
+        --kubelet-arg=config=/var/lib/kubelet/kubelet.config
+        --node-ip {{ nic1_ip }},{{ nic1_ipv6_ula }}{{ nic1_ipv6_token }}
+        --token {{ hostvars['k3s_cluster_token']['token'] }}
+      environment:
+        K3S_DATASTORE_ENDPOINT: "mysql://{{ k3s_mysql_user }}:{{ k3s_mysql_password }}@tcp({{ mysql_ip }}:3306)/{{ k3s_mysql_db }}"
+
+- hosts: --redacted--
+  become: true
+  gather_facts: no
+
+  tasks:
+    - name: Upload kubelet config on worker nodes
+      copy:
+        dest: /var/lib/kubelet/kubelet.config
+        src: /home/dudoleitor/ansible/kubernetes-agents/kubelet.config
+    - name: Install k3s on worker nodes
+      when: k3s_download.changed
+      shell: >
+        sh /usr/local/bin/k3s-latest
+        --kubelet-arg=config=/var/lib/kubelet/kubelet.config
+        --node-ip {{ nic1_ip }},{{ nic1_ipv6_ula }}{{ nic1_ipv6_token }}
+      environment:
+        K3S_URL: "https://cluster-01.local.dudoleitor.com:6442"
+        K3S_TOKEN: "{{ hostvars['k3s_cluster_token']['token'] }}"

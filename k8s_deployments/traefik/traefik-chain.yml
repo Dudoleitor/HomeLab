@@ -1,0 +1,40 @@
+# This middleware chain is applied at entrypoint level directly
+# into traefik configuration.
+#
+# This chain middleware uses other middlewares to ensure
+# the traffic is properly secured.
+# Ensure every other piece has been loaded before applying this
+# confing.
+#
+# HSTS will be configured, when needed, at ingress level.
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: securedin
+  namespace: kube-system
+spec:
+  chain:
+    middlewares:
+    - name: kube-system-ratelimitin@kubernetescrd
+    - name: kube-system-inflightreqin@kubernetescrd
+    # - name: kube-system-modsecin@kubernetescrd
+# ForwardAuth is used to authenticate requests using crowdsec
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: securedext
+  namespace: kube-system
+  annotations:
+    kubernetes.io/ingress.class: traefik-external
+  labels:
+    traffic-type: external
+spec:
+  chain:
+    middlewares:
+    - name: kube-system-realip@kubernetescrd
+    - name: kube-system-ratelimitext@kubernetescrd
+    - name: kube-system-inflightreqext@kubernetescrd
+    - name: kube-system-crowdsec@kubernetescrd
+    # - name: kube-system-modsecext@kubernetescrd

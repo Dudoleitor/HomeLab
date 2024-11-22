@@ -1,0 +1,45 @@
+apiVersion: projectcalico.org/v3
+kind: NetworkPolicy
+metadata:
+  name: syncthing
+  namespace: default
+spec:
+  selector: app == 'syncthing'
+  ingress:
+  - source:
+      nets:
+      - 1.2.3.4/24
+      - 1.2.3.5/24
+    destination:
+      ports:
+      - syncthing-gui
+      - syncthing-tcp
+    protocol: TCP
+    action: Allow
+  - source:
+      nets:
+      - 1.2.3.4/24
+      - 1.2.3.5/24
+    destination:
+      ports:
+      - syncthing-quic
+    protocol: UDP
+    action: Allow
+  egress:
+  - destination:
+      nets:
+      - 1.2.3.4/24
+      - 1.2.3.5/24
+      ports:
+      - syncthing-gui
+      - syncthing-tcp
+    protocol: TCP
+    action: Allow
+  - destination:
+      nets:
+      - 1.2.3.4/24
+      - 1.2.3.5/24
+      ports:
+      - syncthing-quic
+    protocol: UDP
+    action: Allow

@@ -1,0 +1,326 @@
+# This deployment implements gitea, a private git repo
+# 
+# --> Before applying the deployment, a persistent volume has to be created:
+# in Longhorn (through the GUI) create a volume 'gitea' (2Gi rwX) and the relative PVC;
+# since the container runs with user 65300, you need to mount the volume using a temp shell,
+# create two folders data and config and chown 65300:65300.
+#
+# - the second certificate is mantained through cert-manager, the secret name is 'carlotto-wildcard',
+# be sure that cert-manager is properly configured.
+# - the third certificate is mantained through cert-manager, the secret name is 'dudoleitor-wildcard',
+# be sure that cert-manager is properly configured.
+#
+# --> Before applying the deployment, a secret with the needed credentials has to be
+# created.
+# kubectl create secret generic gitea-creds
+#  --from-literal=mysql-user=user
+#  --from-literal=mysql-password=pass
+#  --from-literal=smtp-user=user
+#  --from-literal=smtp-password=pass
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gitea
+  annotations:
+    field.cattle.io/description: gitea, private git repo
+  namespace: default
+spec:
+  replicas: 1
+  strategy: 
+    type: Recreate
+  revisionHistoryLimit: 0  # Cleaning up all old replicasets
+  selector: 
+    matchLabels: 
+     app: gitea 
+  template:
+    metadata:
+      labels:
+        app: gitea
+    spec:
+      containers:
+        - image: gitea/gitea:1.22.3-rootless  # https://docs.gitea.io/en-us/install-with-docker/
+          imagePullPolicy: IfNotPresent
+          name: gitea
+          ports:
+            - containerPort: 3000
+              name: gitea-ui
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /var/lib/gitea
+              subPath: data
+              name: gitea-vol
+            - mountPath: /etc/gitea
+              subPath: config
+              name: gitea-vol
+            - mountPath: /tmp  # To allow multiple instances
+              name: temp
+            - mountPath: /etc/ssl/certs/ca-certificates.crt
+              name: certs-store
+              subPath: ca-certificates.crt
+              readOnly: true
+          env:
+          - name: USER_ID
+            value: '65300'
+          - name: USER_GID
+            value: '65300'
+          - name: USER
+            value: 'git'
+          - name: GITEA__queue__DATADIR
+            value: '/tmp/gitea-queue'
+          - name: GITEA__indexer__ISSUE_INDEXER_TYPE
+            value: 'db'
+          - name: GITEA__database__DB_TYPE
+            value: 'mysql'
+          - name: GITEA__database__HOST
+            value: '10.40.10.19:3305'  # Be sure the IP is allowed in the network policy
+          - name: GITEA__database__NAME
+            value: 'gitea'
+          - name: GITEA__database__USER
+            valueFrom:
+              secretKeyRef:
+                name: gitea-creds
+                key: mysql-user
+          - name: GITEA__database__PASSWD
+            valueFrom:
+              secretKeyRef:
+                name: gitea-creds
+                key: mysql-password
+          - name: GITEA__service__DISABLE_REGISTRATION
+            value: 'true'
+          - name: GITEA__openid__ENABLE_OPENID_SIGNIN
+            value: 'false'
+          - name: GITEA__mailer__ENABLED
+            value: 'true'
+          - name: GITEA__mailer__SMTP_ADDR
+            value: 'relay-smtp.dudoleitor.com'  # Be sure the IP is allowed in the network policy
+          - name: GITEA__mailer__SMTP_PORT
+            value: '587'  # Be sure the port is allowed in the network policy
+          - name: GITEA__mailer__FROM
+            value: 'git-dudoleitor <noreply@dudoleitor.com>'
+          - name: GITEA__mailer__ENVELOPE_FROM
+            value: 'noreply@dudoleitor.com'
+          # TODO generate creds
+          - name: GITEA__mailer__USER
+            valueFrom:
+              secretKeyRef:
+                name: gitea-creds
+                key: smtp-user
+          - name: GITEA__mailer__PASSWD
+            valueFrom:
+              secretKeyRef:
+                name: gitea-creds
+                key: smtp-password
+          - name: GITEA__server__DOMAIN
+            value: 'git.carl-otto.it'
+          - name: GITEA__server__DISABLE_SSH
+            value: 'true'
+          - name: GITEA__server__ROOT_URL
+            value: 'https://git.carl-otto.it/'
+          # Not limiting resources, using the default of the namespace
+          resources:  # Limiting resources is always better, adjust accordingly
+            limits:
+              cpu: 100m
+              memory: 300Mi
+            requests:
+              cpu: 50m
+              memory: 128Mi
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            runAsUser: 65300
+            runAsGroup: 65300
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: true
+          livenessProbe:
+            failureThreshold: 10
+            initialDelaySeconds: 200
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 1
+            tcpSocket:
+              port: gitea-ui
+          readinessProbe:
+            failureThreshold: 3
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 1
+            tcpSocket:
+              port: gitea-ui
+      dnsPolicy: ClusterFirst
+      securityContext:
+        fsGroup: 65300
+        runAsUser: 65300
+        runAsGroup: 65300
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      terminationGracePeriodSeconds: 30
+      volumes:
+        - name: gitea-vol
+          persistentVolumeClaim:
+            claimName: gitea  # Needs to be created manually in longhorn
+        - name: temp
+          emptyDir: {}
+        - name: certs-store
+          hostPath:
+            path: /etc/ssl/certs
+---
+kind: Service 
+apiVersion: v1 
+metadata:
+  name: gitea-svc
+  namespace: default
+spec:
+  type: ClusterIP 
+  selector:
+    app: gitea 
+  ports:
+    - port: 80
+      targetPort: 3000
+      name: http
+# There will be two different ingresses to handle requests coming to the internal traefik ingress and to the
+# external traefik ingress.
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    # This configuration will reject http requests, the redirect ingress below is needed to handle those
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    traefik.ingress.kubernetes.io/router.middlewares: default-hstsxssin@kubernetescrd
+  name: gitea-in
+  namespace: default
+spec:
+  rules:
+  - host: git.carl-otto.it  # Add DNS entry for this domain to the ingress IP (primary or secondary)
+    http:
+      paths:
+      - backend:
+          service:
+            name: gitea-svc
+            port:
+              number: 80
+        path: /
+        pathType: ImplementationSpecific
+  - host: git.dudoleitor.com  # Add DNS entry for this domain to the ingress IP (primary or secondary)
+    http:
+      paths:
+      - backend:
+          service:
+            name: gitea-svc
+            port:
+              number: 80
+        path: /
+        pathType: ImplementationSpecific
+  tls:
+  - secretName: carlotto-wildcard  # Be sure that cert-manager has been configured
+    hosts:
+    - git.carl-otto.it
+  - secretName: dudoleitor-wildcard  # Be sure that cert-manager has been configured
+    hosts:
+    - git.dudoleitor.com
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    # This configuration will reject http requests, the redirect ingress below is needed to handle those
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    traefik.ingress.kubernetes.io/router.middlewares: default-hstsxssext@kubernetescrd
+    kubernetes.io/ingress.class: traefik-external
+  labels:
+    traffic-type: external
+  name: gitea-ext
+  namespace: default
+spec:
+  rules:
+  - host: git.carl-otto.it  # Add DNS entry for this domain to the ingress IP (primary or secondary)
+    http:
+      paths:
+      - backend:
+          service:
+            name: gitea-svc
+            port:
+              number: 80
+        path: /
+        pathType: ImplementationSpecific
+  - host: git.dudoleitor.com  # Add DNS entry for this domain to the ingress IP (primary or secondary)
+    http:
+      paths:
+      - backend:
+          service:
+            name: gitea-svc
+            port:
+              number: 80
+        path: /
+        pathType: ImplementationSpecific
+  tls:
+  - secretName: carlotto-wildcard  # Be sure that cert-manager has been configured
+    hosts:
+    - 'git.carl-otto.it'
+  - secretName: dudoleitor-wildcard  # Be sure that cert-manager has been configured
+    hosts:
+    - 'git.dudoleitor.com'
+
+
+# ---
+# # This ingress route is needed to handle ssh traffic
+# apiVersion: traefik.containo.us/v1alpha1
+# kind: IngressRouteTCP
+# metadata:
+#   name: gitea-in
+#   namespace: default
+# spec:
+#   entryPoints:
+#     - ssh
+#   routes:
+#   # Match is the rule corresponding to an underlying router.
+#   - match: HostSNI(`*`)
+#     services:
+#     - name: gitea-svc
+#       port: 22
+# In order for this route to work:
+# add port 8022 as entrypoint in the traefik configuration through flags
+# add port 8022 as forwarded port in the container settings
+# add port 22 to the traefik service and forward it to 8022
+# add port 22 to the traefik-bridge service and forward it to 8022
+# in the firewall of the nodes, be sure port 22 is reachable using the lb ip
+
+
+---
+# This secondary ingress is needed to properly redirect http requests to https
+# The middleware 'redirect' needs to be deployed in the namespace 'default', check traefik-midd-httpred.yml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gitea-in-redirect
+  namespace: default
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web  # <namespace>-<middleware>@kubernetescrd
+    traefik.ingress.kubernetes.io/router.middlewares: default-redirect@kubernetescrd
+spec:
+  rules:
+    - host: git.carl-otto.it
+      http:
+        paths:
+          - backend:
+              service:
+                name: gitea-svc
+                port:
+                  number: 80
+            path: /
+            pathType: ImplementationSpecific
+    - host: git.dudoleitor.com
+      http:
+        paths:
+          - backend:
+              service:
+                name: gitea-svc
+                port:
+                  number: 80
+            path: /
+            pathType: ImplementationSpecific

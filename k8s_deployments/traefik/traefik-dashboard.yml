@@ -1,0 +1,99 @@
+# Use this deployment to expose the traefik ingress internal dashboard
+# Create a DNS entry for 'kube-traefik-dash.local.dudoleitor.com'
+# pointing to the ingress ip (primary or secondary).
+# Always reach http://kube-traefik-dash.local.dudoleitor.com/dashboard/
+# (note the ending slash).
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: traefik-internal-dashboard
+  namespace: kube-system
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`kube-traefik-dash.local.dudoleitor.com`) && (PathPrefix(`/dashboard`) || PathPrefix(`/api`))
+      kind: Rule
+      middlewares:
+      # - name: lan-whitelist
+      #   namespace: default
+      - name: autheliain
+        namespace: kube-system
+      services:
+        - name: api@internal
+          kind: TraefikService
+  tls:
+    secretName: local-dudoleitor-wildcard  # Manged by cert-manager
+    domains:
+      - main: kube-traefik-dash.local.dudoleitor.com
+# Use this deployment to expose the traefik ingress external dashboard
+# Create a DNS entry for 'ext-traefik-dash.local.dudoleitor.com'
+# pointing to the ingress ip (primary or secondary).
+# Always reach http://ext-traefik-dash.local.dudoleitor.com/dashboard/
+# (note the ending slash).
+# We are creating an ingress route on the internal ingress that
+# reaches the 9000 port of the external ingress.
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    # This configuration will reject http requests, the redirect ingress below is needed to handle those
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.middlewares: default-lan-whitelist@kubernetescrd,kube-system-autheliain@kubernetescrd
+  name: traefik-external-dashboard
+  namespace: kube-system
+spec:
+  rules:
+  - host: ext-traefik-dash.local.dudoleitor.com  # Add DNS entry for this domain to the ingress IP (primary or secondary)
+    http:
+      paths:
+      - backend:
+          service:
+            name: traefik-external-cluster
+            port:
+              number: 9000
+        path: /
+        pathType: ImplementationSpecific
+  tls:
+  - hosts:
+    - ext-traefik-dash.local.dudoleitor.com
+    secretName: local-dudoleitor-wildcard  # Manged by cert-manager
+# Since the traefik instance looks for the label traffic-type and the ingress class,
+# the default route by kubernetescrd wont' be recognised by the external ingress.
+# This is need to access the dashboard on port 9000
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: traefik-ext-dashboard-port
+  namespace: kube-system
+  annotations:
+    kubernetes.io/ingress.class: traefik-external
+  labels:
+    traffic-type: external
+spec:
+  entryPoints:
+    - traefik
+  routes:
+    - match: (PathPrefix(`/dashboard`) || PathPrefix(`/api`))
+      kind: Rule
+      services:
+        - name: api@internal
+          kind: TraefikService
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: traefik-in-dashboard-port
+  namespace: kube-system
+spec:
+  entryPoints:
+    - traefik
+  routes:
+    - match: (PathPrefix(`/dashboard`) || PathPrefix(`/api`))
+      kind: Rule
+      services:
+        - name: api@internal
+          kind: TraefikService

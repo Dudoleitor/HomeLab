@@ -1,0 +1,93 @@
+- hosts: dns2.local.dudoleitor.com
+  become: yes
+  gather_facts: no
+  tasks:
+  - name: Update packages
+    apt:
+      update_cache: yes
+      force_apt_get: yes
+  - name: Setup cloudflared service [1/2]
+    copy:
+      src: /home/dudoleitor/ansible/pihole/{{ item }}.service
+      dest: /etc/systemd/system/{{ item }}.service
+      mode: 0644
+      owner: root
+      group: root
+      force: yes
+    loop: [cloudflared, cloudflared6]
+  - name: Setup cloudflared service [2/2]
+    copy:
+      src: /home/dudoleitor/ansible/pihole/{{ item }}.default
+      dest: /etc/default/{{ item}}
+      mode: 0644
+      owner: root
+      group: root
+      force: yes
+    loop: [cloudflared, cloudflared6]
+  - name: Create cloudflared service
+    service:
+      name: '{{ item }}'
+      enabled: yes
+    loop: [cloudflared, cloudflared6]
+
+  - name: Create cloudflared user
+    user:
+      name: cloudflared
+      system: yes
+      shell: /usr/sbin/nologin
+      createhome: no
+
+  - name: Download latest cloudflared binary
+    get_url:
+      dest: /usr/local/bin/cloudflared-latest
+      mode: 0555
+      owner: cloudflared
+      group: cloudflared
+      url: "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-{{ arch }}"
+      force: yes
+    register: cloudflared_download
+
+  - name: Stop cloudflared service
+    when: cloudflared_download.changed
+    service:
+      name: '{{ item }}'
+      state: stopped
+    loop: [cloudflared, cloudflared6]
+
+  - name: Overwrite cloudflared binary
+    when: cloudflared_download.changed
+    copy:
+      src: /usr/local/bin/cloudflared-latest
+      dest: /usr/local/bin/cloudflared
+      mode: 0555
+      owner: cloudflared
+      group: cloudflared
+      force: yes
+      remote_src: yes
+
+  - name: Restart cloudflared service
+    when: cloudflared_download.changed
+    service:
+      name: '{{ item }}'
+      state: started
+    loop: [cloudflared, cloudflared6]
+
+  - name: Create pihole directory
+    file:
+      path: "/etc/pihole"
+      state: directory
+      mode: 0755
+  - name: Upload setupVars.conf
+    template:
+      src: /home/dudoleitor/ansible/pihole/setupVars.conf
+      dest: /etc/pihole/setupVars.conf
+      mode: 0644
+      owner: root
+      group: root
+      force: yes
+  
+  - name: Install pihole
+    shell: wget -O - https://install.pi-hole.net | bash /dev/stdin --unattended
+
+  - name: Change default privacy level
+    shell: pihole -a -l 1

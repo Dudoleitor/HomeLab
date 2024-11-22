@@ -1,0 +1,110 @@
+# This cronjob will spawn a pod to run renovate-bot.
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: renovate
+  namespace: default
+spec:
+  concurrencyPolicy: Forbid
+  schedule: '30 4 * * *'  # Cron schedule
+  failedJobsHistoryLimit: 0
+  successfulJobsHistoryLimit: 0
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 600
+      template:
+        metadata:
+          labels:
+            app: renovate
+        spec:
+          priorityClassName: lower-priority-2000
+          restartPolicy: Never
+          containers:
+          - name: renovate-bot
+            image: renovate/renovate:latest
+            imagePullPolicy: IfNotPresent
+            args:
+            - dudoleitor/k8s_deployments
+            env:
+            - name: LOG_LEVEL
+              value: 'INFO'
+            - name: RENOVATE_ENDPOINT
+              value: 'https://git.carl-otto.it/'
+            - name: GIT_SSL_NO_VERIFY
+              value: '1'
+            - name: NODE_TLS_REJECT_UNAUTHORIZED
+              value: '0'
+            - name: RENOVATE_PLATFORM
+              value: 'gitea'
+            - name: RENOVATE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: renovate-creds
+                  key: token
+            - name: GITHUB_COM_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: renovate-creds
+                  key: gh-token
+            - name: RENOVATE_AUTODISCOVER
+              value: 'false'
+            - name: RENOVATE_PR_HOURLY_LIMIT
+              value: '0'  # By default it's 2
+            - name: RENOVATE_GIT_AUTHOR
+              value: 'Renovate Bot <bot@dudoleitor.com>'
+            - name: RENOVATE_BASE_DIR
+              value: /tmp/renovate
+            - name: RENOVATE_CONFIG_FILE
+              value: /opt/renovate/config.json
+            volumeMounts:
+            - mountPath: /opt/renovate/config.json
+              name: conf
+              subPath: config.json
+            - mountPath: /tmp/renovate
+              name: tmp
+            securityContext:
+              privileged: false
+              allowPrivilegeEscalation: false
+              runAsUser: 64200
+              runAsGroup: 64200
+              capabilities:
+                drop:
+                - ALL
+              readOnlyRootFilesystem: true
+            resources:  # Limiting resources is always better, adjust accordingly
+              limits:
+                cpu: 250m
+                memory: 768Mi
+              requests:
+                cpu: 125m
+                memory: 256Mi
+          hostAliases:
+          - ip: "1.2.3.4"
+            hostnames:
+            - "internal-repo.local.dudoleitor.com"
+          securityContext:
+            fsGroup: 64200
+            runAsUser: 64200
+            runAsGroup: 64200
+          terminationGracePeriodSeconds: 10
+          volumes:
+          - name: conf
+            configMap:
+              name: renovate-config
+          - name: tmp
+            emptyDir: {}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: renovate-config
+data:
+  config.json: |-
+    {
+      "kubernetes": {
+        "fileMatch": ["\\.yml$"]
+      }
+    }
+

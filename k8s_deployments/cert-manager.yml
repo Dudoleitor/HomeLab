@@ -1,0 +1,185 @@
+# This deployment configures cert-manager to obtain a wildcard certificate
+# for dudoleitor.com and carl-otto.it
+# The secrets carlottowildcard and dudoleitorwildcard will be
+# available in the kube-system namespace.
+#
+# First of all, install cert-manager:
+# kubectl create namespace cert-manager
+# kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.7.2/cert-manager.yaml
+#
+# Note: the certificate can't be overwritten, so it's ok to receive an error 'error when applying patch'.
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-production
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: cartmaster@dudoleitor.com
+
+    # Name of a secret used to store the ACME account private key
+    privateKeySecretRef:
+      name: letsencrypt-production
+
+    # ACME DNS-01 provider configurations
+    solvers:
+    # We only use cloudflare to solve challenges for example.org.
+    # Alternative options such as 'matchLabels' and 'dnsZones' can be specified
+    # as part of a solver's selector too.
+    - selector:
+        dnsNames:
+        - carl-otto.it
+        - "*.carl-otto.it"
+        - auth.carl-otto.it
+        - graphs.carl-otto.it
+      dns01:
+        cloudflare:
+          email: webmaster@carl-otto.it
+          # Use the template below to create the secret
+          apiKeySecretRef:
+            name: cloudflare-carl-api-key-secret
+            key: api-key
+    - selector:
+        dnsNames:
+        - dudoleitor.com
+        - "*.dudoleitor.com"
+        - local.dudoleitor.com
+        - "*.local.dudoleitor.com"
+        - auth.dudoleitor.com
+        - longhorn.local.dudoleitor.com
+      dns01:
+        cloudflare:
+          email: webmaster@dudoleitor.com
+          # Use the template below to create the secret
+          apiKeySecretRef:
+            name: cloudflare-dudo-api-key-secret
+            key: api-key
+# ---
+# apiVersion: v1
+# kind: Secret
+# metadata:
+#   name: cloudflare-carl-api-key-secret
+#   namespace: cert-manager
+# type: Opaque
+# stringData:
+#   api-key: ""
+# #Apply the secret and remove the key from the file !!
+# ---
+# apiVersion: v1
+# kind: Secret
+# metadata:
+#   name: cloudflare-dudo-api-key-secret
+#   namespace: cert-manager
+# type: Opaque
+# stringData:
+#   api-key: ""
+# #Apply the secret and remove the key from the file !!
+---
+apiVersion: cert-manager.io/v1
+kind: certificate
+metadata:
+  name: carlotto-grafana
+  namespace: monitoring
+spec:
+  secretName: carlotto-grafana
+  issuerRef:
+    name: letsencrypt-production
+    kind: ClusterIssuer
+  dnsNames:
+  - "graphs.carl-otto.it"
+---
+apiVersion: cert-manager.io/v1
+kind: certificate
+metadata:
+  name: carlotto-wildcard
+  namespace: default
+spec:
+  secretName: carlotto-wildcard
+  issuerRef:
+    name: letsencrypt-production
+    kind: ClusterIssuer
+  dnsNames:
+  - "carl-otto.it"
+  - "*.carl-otto.it"
+---
+apiVersion: cert-manager.io/v1
+kind: certificate
+metadata:
+  name: carlotto-authelia
+  namespace: authelia
+spec:
+  secretName: carlotto-authelia
+  issuerRef:
+    name: letsencrypt-production
+    kind: ClusterIssuer
+  dnsNames:
+  - "auth.carl-otto.it"
+---
+apiVersion: cert-manager.io/v1
+kind: certificate
+metadata:
+  name: dudoleitor-wildcard
+  namespace: default
+spec:
+  secretName: dudoleitor-wildcard
+  issuerRef:
+    name: letsencrypt-production
+    kind: ClusterIssuer
+  dnsNames:
+  - "dudoleitor.com"
+  - "*.dudoleitor.com"
+---
+apiVersion: cert-manager.io/v1
+kind: certificate
+metadata:
+  name: dudoleitor-authelia
+  namespace: authelia
+spec:
+  secretName: dudoleitor-authelia
+  issuerRef:
+    name: letsencrypt-production
+    kind: ClusterIssuer
+  dnsNames:
+  - "auth.dudoleitor.com"
+---
+apiVersion: cert-manager.io/v1
+kind: certificate
+metadata:
+  name: local-dudoleitor-wildcard
+  namespace: kube-system
+spec:
+  secretName: local-dudoleitor-wildcard
+  issuerRef:
+    name: letsencrypt-production
+    kind: ClusterIssuer
+  dnsNames:
+  - "local.dudoleitor.com"
+  - "*.local.dudoleitor.com"
+---
+apiVersion: cert-manager.io/v1
+kind: certificate
+metadata:
+  name: local-dudoleitor-wildcard
+  namespace: default
+spec:
+  secretName: local-dudoleitor-wildcard
+  issuerRef:
+    name: letsencrypt-production
+    kind: ClusterIssuer
+  dnsNames:
+  - "local.dudoleitor.com"
+  - "*.local.dudoleitor.com"
+---
+apiVersion: cert-manager.io/v1
+kind: certificate
+metadata:
+  name: dudoleitor-longhorn
+  namespace: longhorn-system
+spec:
+  secretName: dudoleitor-longhorn
+  issuerRef:
+    name: letsencrypt-production
+    kind: ClusterIssuer
+  dnsNames:
+  - "longhorn.local.dudoleitor.com"

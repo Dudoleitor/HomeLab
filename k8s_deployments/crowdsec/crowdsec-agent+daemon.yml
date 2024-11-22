@@ -1,0 +1,350 @@
+# --> Before applying the deployment, a persistent volume needs to be created:
+# in Longhorn (through the GUI) create a volume 'crowdsec-db-vol' (1Gi rwo)
+# with its relative PVC.
+# Before applying the deployment, a secret with the agent-credentials
+# must be created.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    k8s-app: crowdsec
+    type: lapi
+  name: crowdsec-lapi
+  namespace: crowdsec
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 1  # Only one replica is allowed for the central api
+  revisionHistoryLimit: 0
+  selector:
+    matchLabels:
+      k8s-app: crowdsec
+      type: lapi
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        k8s-app: crowdsec
+        type: lapi
+    spec:
+      priorityClassName: higher-priority-2000
+      containers:
+      - image: crowdsecurity/crowdsec:v1.6.3-slim
+        imagePullPolicy: IfNotPresent
+        name: crowdsec-lapi
+        env:
+        - name: AGENT_USERNAME
+          valueFrom:
+            secretKeyRef:
+              key: username
+              name: agent-credentials
+        - name: AGENT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: password
+              name: agent-credentials
+        - name: BOUNCER_KEY_cloudflare  
+          valueFrom:
+            secretKeyRef:
+              key: cloudflare
+              name: bouncer-credentials
+        - name: DISABLE_AGENT
+          value: "true"
+        - name: DISABLE_ONLINE_API
+          value: "false"
+        - name: COLLECTIONS
+          value: "crowdsecurity/linux crowdsecurity/traefik crowdsecurity/nginx"
+        - name: PARSERS
+          value: "crowdsecurity/cri-logs"
+        ports:
+        - containerPort: 8080
+          name: lapi
+          protocol: TCP
+        - containerPort: 6060
+          name: metrics
+          protocol: TCP
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /var/lib/crowdsec/data
+          name: cs-db
+        resources:  # Limiting resources is always better, adjust accordingly
+          limits:
+            cpu: 250m
+            memory: 128Mi
+          requests:
+            cpu: 65m
+            memory: 100Mi
+        securityContext:
+          privileged: false
+          allowPrivilegeEscalation: false
+          # runAsUser: 65427
+          # runAsGroup: 65427
+          capabilities:
+            drop:
+            - ALL
+        readinessProbe:
+          httpGet:
+            port: lapi
+            path: /health
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            port: lapi
+            path: /health
+          initialDelaySeconds: 20
+          periodSeconds: 10
+      dnsPolicy: ClusterFirst
+      # securityContext:
+      #   fsGroup: 65427
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - name: cs-db
+        persistentVolumeClaim:
+          claimName: crowdsec-db-vol
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  labels:
+    k8s-app: crowdsec
+    type: agent
+  name: crowdsec-agent
+  namespace: crowdsec
+spec:
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      k8s-app: crowdsec
+      type: agent
+  template:
+    metadata:
+      labels:
+        k8s-app: crowdsec
+        type: agent
+    spec:
+      containers:
+      - image: crowdsecurity/crowdsec:v1.6.3-slim
+        imagePullPolicy: IfNotPresent
+        name: crowdsec-agent
+        command:
+        - sh
+        - -c
+        - mv -n /staging/etc/crowdsec/* /etc/crowdsec/ && rm -rf /staging/etc/crowdsec
+          && cp /tmp/nextcloud-logs.yaml /etc/crowdsec/parsers/s01-parse/nextcloud-logs.yaml
+          && cp /tmp/nextcloud-bf.yaml /etc/crowdsec/scenarios/nextcloud-bf.yaml
+          && cp /tmp/vaultwarden-logs.yaml /etc/crowdsec/parsers/s01-parse/vaultwarden-logs.yaml
+          && cp /tmp/vaultwarden-bf.yaml /etc/crowdsec/scenarios/vaultwarden-bf.yaml
+          && cp /tmp/grafana-logs.yaml /etc/crowdsec/parsers/s01-parse/grafana-logs.yaml
+          && cp /tmp/grafana-bf.yaml /etc/crowdsec/scenarios/grafana-bf.yaml
+          && cp /tmp/apache-guacamole-logs.yaml /etc/crowdsec/parsers/s01-parse/apache-guacamole-logs.yaml
+          && cp /tmp/apache-guacamole-bf.yaml /etc/crowdsec/scenarios/apache-guacamole-bf.yaml
+          && cp /tmp/http-probing.yaml /etc/crowdsec/scenarios/http-probing.yaml
+          && ./docker_start.sh
+        env:
+        - name: AGENT_USERNAME
+          valueFrom:
+            secretKeyRef:
+              key: username
+              name: agent-credentials
+        - name: AGENT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: password
+              name: agent-credentials
+        - name: NO_HUB_UPGRADE
+          value: "true"
+        - name: LOCAL_API_URL
+          value: http://crowdsec-service.crowdsec:8080
+        - name: DISABLE_LOCAL_API
+          value: "true"
+        - name: DISABLE_ONLINE_API
+          value: "false"
+        - name: COLLECTIONS
+          value: "crowdsecurity/http-cve crowdsecurity/linux"
+        # http-probing inside base-http-scenarios needs to be customized, so the other scenarios and parsers must be installed one by one
+        # we manually added everything of the scenarios nginx and traefik
+        - name: PARSERS
+          value: "crowdsecurity/cri-logs crowdsecurity/http-logs crowdsecurity/traefik-logs crowdsecurity/nginx-logs"
+        - name: SCENARIOS
+          value: "crowdsecurity/http-crawl-non_statics crowdsecurity/http-bad-user-agent crowdsecurity/http-path-traversal-probing crowdsecurity/http-sensitive-files crowdsecurity/http-sqli-probing crowdsecurity/http-xss-probing crowdsecurity/http-backdoors-attempts ltsich/http-w00tw00t crowdsecurity/http-generic-bf crowdsecurity/http-open-proxy crowdsecurity/http-admin-interface-probing crowdsecurity/nginx-req-limit-exceeded"
+        ports:
+        - containerPort: 6060
+          name: metrics
+          protocol: TCP
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /var/log/containers
+          name: varlog-cont
+          readOnly: true
+        - mountPath: /var/log/pods
+          name: varlog-pods
+          readOnly: true
+
+        - mountPath: /etc/crowdsec/acquis.yaml
+          name: acquis-config-volume
+          subPath: acquis.yaml
+
+        - mountPath: /tmp/nextcloud-logs.yaml
+          name: nextcloud
+          subPath: nextcloud-logs.yaml
+        - mountPath: /tmp/nextcloud-bf.yaml
+          name: nextcloud
+          subPath: nextcloud-bf.yaml
+        - mountPath: /tmp/vaultwarden-logs.yaml
+          name: vaultwarden
+          subPath: vaultwarden-logs.yaml
+        - mountPath: /tmp/vaultwarden-bf.yaml
+          name: vaultwarden
+          subPath: vaultwarden-bf.yaml
+        - mountPath: /tmp/grafana-logs.yaml
+          name: grafana
+          subPath: grafana-logs.yaml
+        - mountPath: /tmp/grafana-bf.yaml
+          name: grafana
+          subPath: grafana-bf.yaml
+        - mountPath: /tmp/apache-guacamole-logs.yaml
+          name: guacamole
+          subPath: apache-guacamole-logs.yaml
+        - mountPath: /tmp/apache-guacamole-bf.yaml
+          name: guacamole
+          subPath: apache-guacamole-bf.yaml
+        - mountPath: /tmp/http-probing.yaml
+          name: http-probing
+          subPath: http-probing.yaml
+        securityContext:
+          privileged: false
+          allowPrivilegeEscalation: false
+          # runAsUser: 65428
+          # runAsGroup: 65428
+          capabilities:
+            drop:
+            - ALL
+      dnsPolicy: ClusterFirst
+      # securityContext:
+      #   fsGroup: 65428
+      initContainers:  # To ensure the agent starts only after the central api
+      - command:
+        - sh
+        - -c
+        - until nc -vvz -w 5 crowdsec-service.crowdsec 8080; do echo waiting for lapi to start;
+          sleep 5; done
+        image: busybox:1.37
+        imagePullPolicy: IfNotPresent
+        name: wait-for-lapi
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      terminationGracePeriodSeconds: 10
+      # tolerations:
+      # - effect: NoSchedule
+      #   operator: Exists
+      #   key: node.kubernetes.io/unschedulable
+      volumes:
+      - configMap:
+          defaultMode: 440
+          name: acquis-configmap
+        name: acquis-config-volume
+      - hostPath:  # Needed to read logs from the other services
+          path: /var/log/containers/
+        name: varlog-cont
+      - hostPath:
+          path: /var/log/pods/
+        name: varlog-pods
+      - configMap:
+          defaultMode: 440
+          name: nextcloud
+        name: nextcloud
+      - configMap:
+          defaultMode: 440
+          name: vaultwarden
+        name: vaultwarden 
+      - configMap:
+          defaultMode: 440
+          name: grafana
+        name: grafana
+      - configMap:
+          defaultMode: 440
+          name: guacamole
+        name: guacamole
+      - configMap:
+          defaultMode: 440
+          name: http-probing
+        name: http-probing
+  updateStrategy:
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+    type: RollingUpdate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: crowdsec-service
+  name: crowdsec-service
+  namespace: crowdsec
+spec:
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+  - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+  - name: metrics
+    port: 6060
+    protocol: TCP
+    targetPort: 6060
+  - name: lapi
+    port: 8080
+    protocol: TCP
+    targetPort: 8080
+  selector:
+    k8s-app: crowdsec
+    type: lapi
+  sessionAffinity: None
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: crowdsec-agent-service
+  name: crowdsec-agent-service
+  namespace: crowdsec
+spec:
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+  - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+  - name: metrics
+    port: 6060
+    protocol: TCP
+    targetPort: 6060
+  selector:
+    k8s-app: crowdsec
+    type: agent
+  sessionAffinity: None
+  type: ClusterIP
+# Default resources limits and requests for the namespace
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: crowdsec-limits
+  namespace: crowdsec
+spec:
+  limits:
+  - default:
+      cpu: 250m
+      memory: 100Mi
+    defaultRequest:
+      cpu: 75m
+      memory: 60Mi
+    type: Container

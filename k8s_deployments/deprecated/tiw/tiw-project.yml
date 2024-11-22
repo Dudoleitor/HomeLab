@@ -1,0 +1,363 @@
+# This deployment implements a tomcat server for the tiw project.
+# 
+# --> Before applying the deployment, SSL certificates need to be created in the namespace 'default':
+# - the certificate is mantained through cert-manager, the secret name is 'carlotto-wildcard',
+# be sure that cert-manager is properly configured.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: tiw-project
+  annotations:
+    field.cattle.io/description: Tomcat to deploy a java application
+  namespace: default
+spec:
+  replicas: 3  # This must match the cluster members set in server.xml --> check configmap
+  serviceName: 'tiw-project'
+  revisionHistoryLimit: 0  # Cleaning up all old replicasets
+  selector: 
+    matchLabels: 
+     app: tomcat
+     instance: tiw-project
+  template:
+    metadata:
+      labels:
+        app: tomcat
+        instance: tiw-project
+    spec:
+      containers:
+        - image: internal-repo.local.dudoleitor.com:5000/tiw-project:stable
+          imagePullPolicy: Always
+          name: tomcat
+          ports:
+            - containerPort: 8080
+              name: tomcat-http
+              protocol: TCP
+            - containerPort: 4000
+              name: tomcat-cluster
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /usr/local/tomcat/conf/server.xml
+              name: server-conf
+              readOnly: true
+              subPath: server.xml
+            - mountPath: /usr/local/tomcat/conf/logging.properties
+              name: server-conf
+              readOnly: true
+              subPath: logging.properties
+            - mountPath: /data
+              name: tiw
+          env:
+          - name: TZ
+            value: 'Europe/Rome'
+          - name: CATALINA_OUT
+            value: '/dev/stdout'
+          - name: imgFolder
+            value: '/data/'
+          - name: dbURL  # Be sure the IP is allowed in the network policy
+            valueFrom:
+              secretKeyRef:
+                name: tiw-creds
+                key: mysql-url
+          - name: dbUser
+            valueFrom:
+              secretKeyRef:
+                name: tiw-creds
+                key: mysql-user
+          - name: dbPassword
+            valueFrom:
+              secretKeyRef:
+                name: tiw-creds
+                key: mysql-password
+          resources:  # Limiting resources is always better, adjust accordingly
+            limits:
+              cpu: 250m
+              memory: 512Mi
+            requests:
+              cpu: 100m
+              memory: 256Mi
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            runAsUser: 65210
+            runAsGroup: 65210
+            capabilities:
+              drop:
+              - ALL
+          readinessProbe:
+            failureThreshold: 1
+            httpGet:
+              path: /
+              port: tomcat-http
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 2
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /
+              port: tomcat-http
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 2
+      dnsPolicy: ClusterFirst
+      securityContext:
+        fsGroup: 65210
+        runAsUser: 65210
+        runAsGroup: 65210
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      terminationGracePeriodSeconds: 30
+      volumes:
+        - name: server-conf
+          configMap:
+            name: tiw-project
+        - name: tiw
+          persistentVolumeClaim:
+            claimName: tiw  # Needs to be created manually in longhorn
+---
+kind: Service 
+apiVersion: v1 
+metadata:
+  name: tiw-project
+  namespace: default
+spec:
+  type: ClusterIP
+  selector:
+    app: tomcat
+    instance: tiw-project
+  ports:
+    - port: 80
+      targetPort: tomcat-http
+      name: http
+# There will be two different ingresses to handle requests coming to the internal traefik ingress and to th
+# external traefik ingress.
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    # This configuration will reject http requests, the redirect ingress below is needed to handle those
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    traefik.ingress.kubernetes.io/router.middlewares: default-ratelimitin@kubernetescrd
+  name: tiw-project-in
+  namespace: default
+spec:
+  rules:
+  - host: tiw.carl-otto.it  # Add DNS entry for this domain to the ingress IP (primary or secondary)
+    http:
+      paths:
+      - backend:
+          service:
+            name: tiw-project
+            port:
+              number: 80
+        path: /
+        pathType: ImplementationSpecific
+  tls:
+  - secretName: carlotto-wildcard  # Be sure that cert-manager has been configured
+    hosts:
+    - tiw.carl-otto.it
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    # This configuration will reject http requests, the redirect ingress below is needed to handle those
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    traefik.ingress.kubernetes.io/router.middlewares: kube-system-realip@kubernetescrd,default-ratelimitext@kubernetescrd,default-inflightreqext@kubernetescrd
+    kubernetes.io/ingress.class: traefik-external
+  labels:
+    traffic-type: external
+  name: tiw-project-ext
+  namespace: default
+spec:
+  rules:
+  - host: tiw.carl-otto.it  # Add DNS entry for this domain in the cloudflare dashboard
+    http:
+      paths:
+      - backend:
+          service:
+            name: tiw-project
+            port:
+              number: 80
+        path: /
+        pathType: ImplementationSpecific
+  tls:
+  - secretName: carlotto-wildcard  # Be sure that cert-manager has been configured
+    hosts:
+    - tiw.carl-otto.it
+---
+# This secondary ingress is needed to properly redirect http requests to https
+# The middleware 'redirect' needs to be deployed in the namespace 'default', check traefik-midd-httpred.yml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: tiw-project-in-redirect
+  namespace: default
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web  # <namespace>-<middleware>@kubernetescrd
+    traefik.ingress.kubernetes.io/router.middlewares: default-ratelimitin@kubernetescrd,default-redirect@kubernetescrd,default-lan-whitelist@kubernetescrd
+spec:
+  rules:
+    - host: tiw.carl-otto.it
+      http:
+        paths:
+          - backend:
+              service:
+                name: tiw-project
+                port:
+                  number: 80
+            path: /
+            pathType: ImplementationSpecific
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tiw-project
+  namespace: default
+data:
+  logging.properties: |
+    handlers = java.util.logging.ConsoleHandler
+
+    .handlers = java.util.logging.ConsoleHandler
+
+    ############################################################
+    # Handler specific properties.
+    # Describes specific configuration info for Handlers.
+    ############################################################
+
+    java.util.logging.ConsoleHandler.level = FINE
+    java.util.logging.ConsoleHandler.formatter = java.util.logging.OneLineFormatter
+    java.util.logging.ConsoleHandler.encoding = UTF-8
+
+    ############################################################
+    # Facility specific properties.
+    # Provides extra control for each logger.
+    ############################################################
+
+    org.apache.catalina.core.ContainerBase.[Catalina].[localhost].level = INFO
+    org.apache.catalina.core.ContainerBase.[Catalina].[localhost].handlers = \
+      java.util.logging.ConsoleHandler
+
+    org.apache.catalina.core.ContainerBase.[Catalina].[localhost].[/manager].level = INFO
+    org.apache.catalina.core.ContainerBase.[Catalina].[localhost].[/manager].handlers = \
+      java.util.logging.ConsoleHandler
+  server.xml: |
+    <?xml version="1.0" encoding="UTF-8"?>
+    <Server port="8005" shutdown="SHUTDOWN">
+      <Listener className="org.apache.catalina.startup.VersionLoggerListener" />
+      <!-- Security listener. Documentation at /docs/config/listeners.html
+      <Listener className="org.apache.catalina.security.SecurityListener" />
+      -->
+      <!-- APR library loader. Documentation at /docs/apr.html -->
+      <Listener className="org.apache.catalina.core.AprLifecycleListener" SSLEngine="on" />
+      <!-- Prevent memory leaks due to use of particular java/javax APIs-->
+      <Listener className="org.apache.catalina.core.JreMemoryLeakPreventionListener" />
+      <Listener className="org.apache.catalina.mbeans.GlobalResourcesLifecycleListener" />
+      <Listener className="org.apache.catalina.core.ThreadLocalLeakPreventionListener" />
+
+      <GlobalNamingResources>
+        <Resource name="UserDatabase" auth="Container"
+                  type="org.apache.catalina.UserDatabase"
+                  description="User database that can be updated and saved"
+                  factory="org.apache.catalina.users.MemoryUserDatabaseFactory"
+                  pathname="conf/tomcat-users.xml" />
+      </GlobalNamingResources>
+      <Service name="Catalina">
+
+        <!-- A "Connector" represents an endpoint by which requests are received
+            and responses are returned. Documentation at :
+            HTTP Connector: /docs/config/http.html
+            AJP  Connector: /docs/config/ajp.html
+            Define a non-SSL/TLS HTTP/1.1 Connector on port 8080
+        -->
+        <Connector port="8080" protocol="HTTP/1.1"
+                  connectionTimeout="20000"
+                  redirectPort="8443" />
+
+
+        <Engine name="Catalina" defaultHost="localhost">
+
+        <Cluster className="org.apache.catalina.ha.tcp.SimpleTcpCluster"
+                channelSendOptions="8">
+
+          <Manager className="org.apache.catalina.ha.session.DeltaManager"
+              expireSessionsOnShutdown="false"
+              notifyListenersOnReplication="true"/>
+
+          # Addressing other pods using internal DNS resolution
+          <Channel className="org.apache.catalina.tribes.group.GroupChannel">
+          <Membership className="org.apache.catalina.tribes.membership.StaticMembershipService">
+            <Member className="org.apache.catalina.tribes.membership.StaticMember"
+                  port="4000"
+
+                  # Pod 1
+                  host="tiw-project-0.tiw-project.default.svc.cluster.local"
+
+                  #Random
+                  uniqueId="{0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}"/>
+            <Member className="org.apache.catalina.tribes.membership.StaticMember"
+                  port="4000"
+
+                  # Pod 2
+                  host="tiw-project-1.tiw-project.default.svc.cluster.local"
+                  
+                  # Random
+                  uniqueId="{1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,1}"/>
+            <Member className="org.apache.catalina.tribes.membership.StaticMember"
+                  port="4000"
+
+                  #Pod 3
+                  host="tiw-project-2.tiw-project.default.svc.cluster.local"
+
+                  # Random
+                  uniqueId="{1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,1}"/>
+          </Membership>
+          <Receiver className="org.apache.catalina.tribes.transport.nio.NioReceiver"
+                address="auto"
+                port="4000"
+                autoBind="100"
+                selectorTimeout="5000"
+                maxThreads="6"/>
+
+          <Sender className="org.apache.catalina.tribes.transport.ReplicationTransmitter">
+            <Transport className="org.apache.catalina.tribes.transport.nio.PooledParallelSender"/>
+          </Sender>
+          <Interceptor className="org.apache.catalina.tribes.group.interceptors.TcpFailureDetector"/>
+          <Interceptor className="org.apache.catalina.tribes.group.interceptors.MessageDispatchInterceptor"/>
+          </Channel>
+
+          <Valve className="org.apache.catalina.ha.tcp.ReplicationValve"
+            filter=""/>
+          <Valve className="org.apache.catalina.ha.session.JvmRouteBinderValve"/>
+
+          <ClusterListener className="org.apache.catalina.ha.session.ClusterSessionListener"/>
+        </Cluster>
+
+          <!-- Use the LockOutRealm to prevent attempts to guess user passwords
+              via a brute-force attack -->
+          <Realm className="org.apache.catalina.realm.LockOutRealm">
+            <!-- This Realm uses the UserDatabase configured in the global JNDI
+                resources under the key "UserDatabase".  Any edits
+                that are performed against this UserDatabase are immediately
+                available for use by the Realm.  -->
+            <Realm className="org.apache.catalina.realm.UserDatabaseRealm"
+                  resourceName="UserDatabase"/>
+          </Realm>
+
+          <Host name="localhost"  appBase="webapps"
+                unpackWARs="true" autoDeploy="true">
+
+            <Valve className="org.apache.catalina.valves.AccessLogValve" directory="logs"
+                  prefix="localhost_access_log" suffix=".txt"
+                  pattern="%h %l %u %t &quot;%r&quot; %s %b" />
+          </Host>
+        </Engine>
+      </Service>
+    </Server>

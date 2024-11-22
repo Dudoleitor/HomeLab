@@ -1,0 +1,115 @@
+# This deployment implements a syncthing server
+# Before applying the deployment, a folder in the nfs share has to be created,
+# since the container runs with user 991, you need to chown the folder and the files
+# to 991:991
+---
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: syncthing
+  annotations:
+    field.cattle.io/description: Syncthing server
+spec:
+  replicas: 1  # This deployment is not meant to be run with more than 1 replica!
+  strategy: 
+    type: Recreate
+  revisionHistoryLimit: 0  # Cleaning up all old replicasets
+  selector:
+    matchLabels:
+      app: syncthing
+  template:
+    metadata:
+      name: syncthing
+      labels:
+        app: syncthing
+    spec:
+      containers:
+        - name: syncthing
+          image: 'syncthing/syncthing'  # https://github.com/syncthing/syncthing/blob/main/README-Docker.md
+          env:
+            - name: PUID
+              value: '991'
+            - name: PGID
+              value: '991'
+            - name: 'STGUIADDRESS'
+              value: '0.0.0.0:8384'
+          ports:
+            - containerPort: 8384  # Web UI
+              protocol: TCP
+              name: syncthing-gui
+            - containerPort: 22000  # TCP file transfers
+              protocol: TCP
+              name: syncthing-tcp
+            - containerPort: 22000  # QUIC file transfers
+              protocol: UDP
+              name: syncthing-quic
+          resources:  # Limiting resources is always better, adjust accordingly
+            limits:
+              cpu: 250m
+              memory: 512Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+          volumeMounts:
+            - mountPath: /var/syncthing
+              name: syncthing-vol
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            runAsUser: 991
+            runAsGroup: 991
+      volumes:
+        - name: syncthing-vol
+          nfs:
+            path: /k3s-cluster/syncthing
+            server: litecoin-internal.local.dudoleitor.com
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      terminationGracePeriodSeconds: 10
+---
+# As the service uses both tcp and udp, we need to specify two separates services
+# They will share the same ip thanks to the load balancer metallb
+kind: Service
+apiVersion: v1
+metadata:
+  name: syncthing-svc-udp
+  annotations:
+    metallb.universe.tf/allow-shared-ip: '242'
+    metallb.universe.tf/loadBalancerIPs: 1.2.3.242  # Be aware that this ip is "hardcoded" in the config of the app
+spec:
+  externalTrafficPolicy: Local  # Needed to preserve client IP, check https://metallb.universe.tf/usage/
+  # The default setting is 'externalTrafficPolicy: Cluster' to ensure load balancing, not needed here
+  internalTrafficPolicy: Cluster
+  ports:
+    - name: 'syncthing-quic'
+      protocol: UDP
+      port: 22000
+      targetPort: syncthing-quic
+  selector:
+    app: syncthing  # Using label 'app' and not the name
+  type: LoadBalancer
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: syncthing-svc-tcp
+  annotations:
+    metallb.universe.tf/allow-shared-ip: '242'
+    metallb.universe.tf/loadBalancerIPs: 1.2.3.242  # Be aware that this ip is "hardcoded" in the config of the app
+spec:
+  externalTrafficPolicy: Local  # Needed to preserve client IP, check https://metallb.universe.tf/usage/
+  # The default setting is 'externalTrafficPolicy: Cluster' to ensure load balancing, not needed here
+  internalTrafficPolicy: Cluster
+  ports:
+    - name: 'syncthing-gui'
+      protocol: TCP
+      port: 80  # 80 forwards to default port
+      targetPort: syncthing-gui
+    - name: 'syncthing-tcp'
+      protocol: TCP
+      port: 22000
+      targetPort: syncthing-tcp
+  selector:
+    app: syncthing
+  type: LoadBalancer

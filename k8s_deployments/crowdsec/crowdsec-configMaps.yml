@@ -1,0 +1,398 @@
+---
+# This configmap is required to specify which logs crowdsec needs to read.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: acquis-configmap
+  namespace: crowdsec
+data:
+  acquis.yaml: |-
+    ---
+    filenames:
+      - /var/log/containers/traefik-external-*_kube-system_*.log
+    labels:
+      type: containerd
+      program: traefik
+    force_inotify: true
+    ---
+    filenames:
+      - /var/log/containers/php-fpm-*_default_*.log
+    labels:
+      type: containerd
+      program: nextcloud
+    force_inotify: true
+    ---
+    filenames:
+      - /var/log/containers/vaultwarden-*_default_*.log
+    labels:
+      type: vaultwarden
+    force_inotify: true
+    ---
+    filenames:
+      - /var/log/containers/grafana-*_monitoring_*.log
+    labels:
+      type: containerd
+      program: grafana
+    force_inotify: true
+    ---
+    filenames:
+      - /var/log/containers/guacamole-*_default_guacamole-*.log
+    labels:
+      type: containerd
+      program: apache-guacamole
+    force_inotify: true
+
+---
+# This config map defines the behaviour of the nextcloud parser and scenario
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nextcloud
+  namespace: crowdsec
+data:
+  nextcloud-logs.yaml: |-
+    ---
+    onsuccess: next_stage
+    filter: "Upper(evt.Parsed.program) == 'NEXTCLOUD'"
+    name: crowdsecurity/nextcloud-logs
+    description: "Parse nextcloud logs"
+    nodes:
+      - grok:
+          pattern: 'Login failed: %{USERNAME:target_user} \(Remote IP: %{IP:source_ip}\)'
+          apply_on: message
+          statics:
+            - meta: target_user
+              expression: "evt.Parsed.target_user"
+            - meta: log_type
+              value: nextcloud_failed_auth
+      - grok:
+          pattern: 'Bruteforce attempt from \\?"%{IP:source_ip}\\?" detected for action \\?"%{DATA:action}\\?"'
+          apply_on: message
+          statics:
+            - meta: action
+              expression: "evt.Parsed.action"
+            - meta: log_type
+              value: nextcloud_bruteforce_attempt
+    statics:
+      - meta: service
+        value: nextcloud
+      - meta: source_ip
+        expression: "evt.Parsed.source_ip"
+      - target: evt.StrTime
+        expression: JsonExtract(evt.Parsed.message, "time")
+
+  nextcloud-bf.yaml: |-
+    ---
+    type: trigger
+    name: crowdsecurity/nextcloud-bf
+    description: "Nextcloud detected bruteforce"
+    filter: "evt.Meta.log_type == 'nextcloud_bruteforce_attempt'"
+    blackhole: 5m
+    reprocess: true
+    labels:
+      service: nextcloud
+      type: bruteforce
+      remediation: true
+    ---
+    type: leaky
+    name: crowdsecurity/nextcloud-bf_pass
+    description: "Detect Nextcloud password bruteforce"
+    filter: "evt.Meta.log_type == 'nextcloud_failed_auth'"
+    leakspeed: "10m"
+    capacity: 5
+    groupby: evt.Meta.source_ip
+    blackhole: 5m
+    reprocess: true
+    labels:
+      service: nextcloud
+      type: bruteforce-pass
+      remediation: true
+    ---
+    type: leaky
+    name: crowdsecurity/nextcloud-bf_user_enum
+    description: "Detect Nextcloud user enum bruteforce"
+    filter: "evt.Meta.log_type == 'nextcloud_failed_auth'"
+    leakspeed: "10m"
+    capacity: 3
+    groupby: evt.Meta.source_ip
+    distinct: evt.Meta.target_user
+    blackhole: 5m
+    reprocess: true
+    labels:
+      service: nextcloud
+      type: bruteforce-user
+      remediation: true
+
+# Instructions to read logs from nextcloud:
+# nextcloud outputs log through php-fpm
+# php logs to stdout and crowdsec reads the container's log
+# In the config file of nextcloud put "log_type" => "errorlog",
+# In the config file of php ensure log_errors=On and error_log=/proc/self/fd/2
+# are present.
+# The parser from the crowdsec-hub needs to be updated, in both the grok nodes
+# "expression: JsonExtract(evt.Parsed.message, "message")"" must be replaced with "apply_on: message"
+
+---
+# This config map defines the behaviour of the vaultwarden parser and scenario
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vaultwarden
+  namespace: crowdsec
+data:
+  vaultwarden-logs.yaml: |-
+    ---
+    onsuccess: next_stage
+    filter: "Upper(evt.Parsed.program) == 'VAULTWARDEN'"
+    name: Dominic-Wagner/vaultwarden-logs
+    description: "Parse vaultwarden logs"
+    pattern_syntax:
+      DATE_YMD: "%{YEAR:year}-%{MONTHNUM:month}-%{MONTHDAY:day}"
+    nodes:
+      - grok:
+          pattern: '\[%{DATE_YMD:date} %{TIME:time}\]\[vaultwarden::api::identity\]\[ERROR\] Username or password is incorrect\. Try again\. IP: %{IP:source_ip}\. Username: %{EMAILADDRESS:username}\.$'
+          apply_on: message
+          statics:
+            - meta: log_type
+              value: vaultwarden_failed_auth
+            - meta: username
+              expression: evt.Parsed.username
+      - grok:
+          pattern: '\[%{DATE_YMD:date} %{TIME:time}\]\[vaultwarden::api::admin\]\[ERROR\] Invalid admin token. IP: %{IP:source_ip}'
+          apply_on: message
+          statics:
+            - meta: log_type
+              value: vaultwarden_failed_admin_auth
+      - grok:
+          pattern: '\[%{DATE_YMD:date} %{TIME:time}\]\[vaultwarden::api::core::two_factor::authenticator\]\[ERROR\] Invalid TOTP code! Server time: %{DATE_YMD:server_date} %{TIME:server_time} %{TZ:server_tz} IP: %{IP:source_ip}'
+          apply_on: message
+          statics:
+            - meta: log_type
+              value: vaultwarden_failed_totp
+    statics:
+        - meta: service
+          value: vaultwarden
+        - meta: source_ip
+          expression: "evt.Parsed.source_ip"
+        - target: evt.StrTime
+          expression: "evt.Parsed.date + ' ' + evt.Parsed.time"
+
+  vaultwarden-bf.yaml: |-
+    # vaultwarden bruteforce
+    type: leaky
+    name: Dominic-Wagner/vaultwarden-bf
+    description: "Detect vaultwarden bruteforce"
+    filter: "evt.Meta.log_type in ['vaultwarden_failed_auth', 'vaultwarden_failed_admin_auth', 'vaultwarden_failed_totp']"
+    leakspeed: 10m
+    capacity: 5
+    groupby: evt.Meta.source_ip
+    blackhole: 5m
+    reprocess: true
+    labels:
+      service: vaultwarden
+      type: bruteforce
+      remediation: true
+    ---
+    # vaultwarden user-enum
+    type: leaky
+    name: Dominic-Wagner/vaultwarden-bf_user-enum
+    description: "Detect vaultwarden user enum bruteforce"
+    filter: evt.Meta.log_type == 'vaultwarden_failed_auth'
+    groupby: evt.Meta.source_ip
+    distinct: evt.Meta.username
+    leakspeed: 10m
+    capacity: 5
+    blackhole: 5m
+    reprocess: true
+    labels:
+      service: vaultwarden
+      type: bruteforce
+      remediation: true
+    
+---
+# This config map defines the behaviour of the grafana parser and scenario
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana
+  namespace: crowdsec
+data:
+  grafana-logs.yaml: |-
+    onsuccess: next_stage
+    name: LePresidente/grafana-logs
+    filter: "evt.Parsed.program == 'grafana'"
+    description: "Parse grafana logs"
+    nodes:
+      - grok:
+          pattern: 't=%{TIMESTAMP_ISO8601:timestamp} level=%{GREEDYDATA:loglevel} msg=("Invalid username or password"|Unauthorized) error="%{GREEDYDATA:error}" remote_addr=%{IP:remote_ip}'
+          apply_on: message
+          statics:
+            - meta: log_type
+              value: grafana_failed_auth
+      - filter: UnmarshalJSON(evt.Parsed.message, evt.Unmarshaled, "grafana") in ["", nil]
+        nodes:
+        - filter: evt.Unmarshaled.grafana.msg == 'Invalid username or password'
+          statics:
+            - meta: log_type
+              value: grafana_failed_auth
+            - parsed: remote_ip
+              expression: evt.Unmarshaled.grafana.remote_addr
+            - parsed: timestamp
+              expression: evt.Unmarshaled.grafana.t
+    statics:
+        - meta: service
+          value: grafana
+        - target: evt.StrTime
+          expression: evt.Parsed.timestamp
+        - meta: source_ip
+          expression: "evt.Parsed.remote_ip"
+
+  grafana-bf.yaml: |-
+    name: LePresidente/grafana-bf
+    description: "Detect grafana bruteforce"
+    filter: "evt.Meta.log_type == 'grafana_failed_auth'"
+    type: leaky
+    groupby: evt.Meta.source_ip
+    leakspeed: 10m
+    capacity: 5
+    blackhole: 5m
+    labels:
+      service: grafana
+      type: bruteforce-pass
+      remediation: true
+---
+# This config map is required for the cf bouncer to work
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  annotations:
+    meta.helm.sh/release-name: crowdsec
+    meta.helm.sh/release-namespace: crowdsec
+  name: cf-bouncer-configmap
+  namespace: crowdsec
+data:
+  config.yaml: |-
+    crowdsec_lapi_url: http://crowdsec-service.crowdsec:8080/
+    crowdsec_lapi_key: API_KEY
+    crowdsec_update_frequency: 30s
+    only_include_decisions_from: ['cscli', 'crowdsec', 'console']
+    cloudflare_config:
+        accounts:
+        - id: ACC_1_ID #carl-otto webmaster
+          zones:
+            - zone_id: ACC_1_ZONE_ID #carl-otto.it
+              actions:
+                - block
+          token: ACC_1_TOKEN
+          ip_list_prefix: crowdsec
+          default_action: block
+          total_ip_list_capacity: 10000 # only this many latest IP decisions would be kept
+        - id: ACC_2_ID #dudoleitor.com webmaster
+          zones:
+            - zone_id: ACC_2_ZONE_ID #dudoleitor.com
+              actions:
+                - block
+          token: ACC_2_TOKEN
+          ip_list_prefix: crowdsec
+          default_action: block
+          total_ip_list_capacity: 10000 # only this many latest IP decisions would be kept
+        update_frequency: 30s
+    daemon: false
+    log_mode: stdout
+    log_dir: /var/log/
+    log_level: info
+    cache_path: /var/lib/crowdsec/crowdsec-cloudflare-bouncer/cache/cloudflare-cache.json
+    prometheus:
+        enabled: true
+        listen_addr: 127.0.0.1
+        listen_port: "2112"
+---
+# This config map defines the behaviour of the guacamole parser and scenario
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: guacamole
+  namespace: crowdsec
+data:
+  apache-guacamole-logs.yaml: |-
+    ---
+    description: "Parses Apache Guacamole logs"
+    filter: "evt.Parsed.program == 'apache-guacamole'"
+    onsuccess: next_stage
+    pattern_syntax:
+      GUAC_CUSTOMUSER: "(%{EMAILADDRESS}|%{USERNAME})"
+    nodes:
+      - grok:
+          pattern: '%{TIMESTAMP_ISO8601:timestamp}.*Authentication attempt from \[%{IP:source_ip}.*for user "%{GUAC_CUSTOMUSER:username}" failed'
+          apply_on: message
+          statics:
+            - meta: log_type
+              value: apache-guacamole_failed_auth
+            - meta: target_user
+              expression: evt.Parsed.username
+    statics:
+        - meta: service
+          value: apache-guacamole
+        - meta: source_ip
+          expression: evt.Parsed.source_ip
+        - target: evt.StrTime
+          expression: evt.Parsed.timestamp
+  apache-guacamole-bf.yaml: |-
+    ---
+    type: leaky
+    name: corvese/apache-guacamole_bf
+    description: "Detect Apache Guacamole user bruteforce"
+    filter: evt.Meta.log_type == 'apache-guacamole_failed_auth'
+    groupby: evt.Meta.source_ip
+    leakspeed: "10m"
+    capacity: 5
+    blackhole: 5m
+    reprocess: true
+    labels:
+      service: apache-guacamole
+      type: bruteforce-pass
+      remediation: true
+    ---
+    type: leaky
+    name: corvese/apache-guacamole_user_enum
+    description: "Detect Apache Guacamole user enum bruteforce"
+    filter: evt.Meta.log_type == 'apache-guacamole_failed_auth'
+    groupby: evt.Meta.source_ip
+    distinct: evt.Meta.target_user
+    leakspeed: "10m"
+    capacity: 3
+    blackhole: 5m
+    labels:
+      service: apache-guacamole
+      type: bruteforce-user
+---
+# This config map overrides the default behaviour for http-probing
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: http-probing
+  namespace: crowdsec
+data:
+  http-probing.yaml: |-
+    ---
+    # 404 scan
+    type: leaky
+    #debug: true
+    name: crowdsecurity/http-probing
+    description: "Detect site scanning/probing from a single ip"
+    filter: "evt.Meta.service == 'http' && evt.Meta.http_status in ['404', '403', '400'] && evt.Parsed.static_ressource == 'false'"
+    groupby: "evt.Meta.source_ip + '/' + evt.Parsed.target_fqdn"
+    distinct: "evt.Meta.http_path"
+    capacity: 20
+    reprocess: true
+    leakspeed: "7s"
+    blackhole: 5m
+    labels:
+      remediation: true
+      classification:
+        - attack.T1595.003
+      behavior: "http:scan"
+      label: "HTTP Probing"
+      spoofable: 0
+      service: http
+      confidence: 1 

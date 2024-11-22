@@ -1,0 +1,9 @@
+[Unit]
+Description=MariaDB has start, unsetting env variable
+After=mariadb.service
+
+[Service]
+ExecStart=/usr/bin/mariadb_bootstrap_env unset
+
+[Install]
+WantedBy=multi-user.target

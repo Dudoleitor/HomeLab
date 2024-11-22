@@ -1,0 +1,124 @@
+---
+- hosts: --redacted--
+  become: true
+  gather_facts: no
+
+  tasks: 
+    - name: Add MariaDB apt key
+      get_url:
+        url: 'https://mariadb.org/mariadb_release_signing_key.asc'
+        dest: '/etc/apt/trusted.gpg.d/mariadb-apt-keyring.asc'
+    - name: Add MariaDB repository
+      apt_repository:
+        repo: 'deb [arch=amd64 signed-by=/etc/apt/trusted.gpg.d/mariadb-apt-keyring.asc] https://mirror.mva-n.net/mariadb/repo/10.6/debian bullseye main'
+        state: present
+
+    - name: Install MariaDB
+      apt: name={{ item }} state=latest update_cache=yes
+      loop: [ 'mariadb-server', 'mariadb-client', 'mariadb-backup' ]
+
+    - name: Upload galera config file
+      copy:
+        src: '/home/dudoleitor/ansible/mariadb/ha-galera.cnf'
+        dest: '/etc/mysql/conf.d/galera.cnf.tmp'
+        force: yes
+      changed_when: False
+    - name: Customize galera config file [1/3] node_ip
+      replace:
+        path: '/etc/mysql/conf.d/galera.cnf.tmp'
+        regexp: 'This_Node_IP'
+        replace: '{{ nic1_ip }}'
+      changed_when: False
+    - name: Customize galera config file [2/3] hostname
+      replace:
+        path: '/etc/mysql/conf.d/galera.cnf.tmp' 
+        regexp: 'This_Node_Name'
+        replace: '{{ hostname }}'
+      changed_when: False
+    - name: Customize galera config file [3/3] mariabackup_password
+      replace:
+        path: '/etc/mysql/conf.d/galera.cnf.tmp'
+        regexp: 'MariaBackup_password'
+        replace: '{{ mysql_mariabackup_password }}'
+      changed_when: False
+    - name: Copy galera config file
+      copy:
+        src: '/etc/mysql/conf.d/galera.cnf.tmp'
+        dest: '/etc/mysql/conf.d/galera.cnf'
+        force: yes
+        remote_src: yes
+    - name: Set permissions to galera config file
+      file:
+        path: '/etc/mysql/conf.d/galera.cnf'
+        owner: 'mysql'
+        group: 'mysql'
+        mode: '660'
+    - name: Temporary config cleanup
+      file:
+        path: '/etc/mysql/conf.d/galera.cnf.tmp'
+        state: absent
+      changed_when: False
+
+    - name: Configure MariaDB to listen on all interfaces
+      replace:
+        path: '/etc/mysql/mariadb.conf.d/50-server.cnf'
+        regexp: "127.0.0.1"
+        replace: "0.0.0.0"
+      register: mariadb_config
+    
+    - name: Set custom max_allow_packets
+      copy:
+        src: '/home/dudoleitor/ansible/mariadb/60-max-packets.cnf'
+        dest: '/etc/mysql/mariadb.conf.d/60-max-packets.cnf'
+
+    - name: Set custom timeouts
+      copy:
+        src: '/home/dudoleitor/ansible/mariadb/60-timeouts.cnf'
+        dest: '/etc/mysql/mariadb.conf.d/60-timeouts.cnf'
+
+    - name: Set innodb_file_per_table
+      copy:
+        src: '/home/dudoleitor/ansible/mariadb/60-innodb.cnf'
+        dest: '/etc/mysql/mariadb.conf.d/60-innodb.cnf'
+
+    - name: Add cluster bootstrap services files
+      copy:
+        src: '/home/dudoleitor/ansible/mariadb/bootstrap_env'
+        dest: '/usr/bin/mariadb_bootstrap_env'
+        force: yes
+    - name: Setting permissions to the file
+      file: dest='/usr/bin/mariadb_bootstrap_env' mode=+x
+
+    - name: Configuring pre service
+      copy:
+        src: '/home/dudoleitor/ansible/mariadb/bootstrap-pre.service'
+        dest: '/etc/systemd/system/mariadb-bootstrap-pre.service'
+        force: yes
+    - name: Enableing pre service
+      service:
+        name: mariadb-bootstrap-pre
+        enabled: yes
+
+    - name: Configuring aft service
+      copy:
+        src: '/home/dudoleitor/ansible/mariadb/bootstrap-aft.service'
+        dest: '/etc/systemd/system/mariadb-bootstrap-aft.service'
+        force: yes
+    - name: Enableing aft service
+      service:
+        name: mariadb-bootstrap-aft
+        enabled: yes
+
+    - name: Create mysql user mariabackup
+      mysql_user:
+        name: mariabackup
+        host: "localhost"
+        password: '{{ mysql_mariabackup_password }}'
+        priv: "*.*:RELOAD,PROCESS,LOCK TABLES,REPLICATION CLIENT"
+        state: present
+        update_password: always
+        login_user: 'root'
+        login_password: '{{ mysql_root_password }}'
+        login_unix_socket: "/var/run/mysqld/mysqld.sock"
+      #run_once: yes
+      no_log: yes

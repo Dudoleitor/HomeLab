@@ -1,0 +1,132 @@
+# This deployment implements uptime-kuma, a container to monitor the stauts of multiple services.
+#
+# --> Before applying the deployment, a persistent volume has to be created:
+# in Longhorn (through the GUI) create a volume 'uptime-kuma' and the relative PVC;
+# since the container runs with user 999, you need to mount the volume using a temp shell
+# and chown 999:999 the volume root directory.
+# If you need to transfer configurations from a previous container,
+# open the volume using a temporary debian container and insert the data files copied
+# from the previous instance.
+# --> Before applying the deployment, an SSL certificate needs to be create in the namespace 'default',
+# the certificate has to be valid for the domain 'uptime.local.dudoleitor.com' and can be
+# uploaded using the rancher ui, the name for the secret is 'tls-uptime-kuma-in'.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: uptime-kuma
+  annotations:
+    field.cattle.io/description: Uptime kuma, to monitor services uptime
+  namespace: default
+spec:
+  replicas: 1  # There is no need to run more than one replica
+  strategy: 
+    type: Recreate
+  revisionHistoryLimit: 0  # Cleaning up all old replicasets
+  selector: 
+    matchLabels: 
+     app: uptime-kuma 
+  template:
+    metadata:
+      labels:
+        app: uptime-kuma
+    spec:
+      containers:
+        - image: internal-repo.local.dudoleitor.com:5000/uptime-kuma  # https://github.com/louislam/uptime-kuma
+          imagePullPolicy: Always
+          name: uptime-kuma
+          ports:
+            - containerPort: 3001
+              name: http
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /etc/uptime-kuma/data
+              name: uptime-kuma-vol
+            - mountPath: /etc/ssl/certs/ca-certificates.crt
+              name: certs-store
+              subPath: ca-certificates.crt
+              readOnly: true
+          # Not limiting resources, using the default of the namespace
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            runAsUser: 999
+            runAsGroup: 999
+      dnsPolicy: ClusterFirst
+      securityContext:
+        fsGroup: 999
+        runAsUser: 999
+        runAsGroup: 999
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      terminationGracePeriodSeconds: 5
+      volumes:
+        - name: uptime-kuma-vol
+          persistentVolumeClaim:
+            claimName: uptime-kuma # Needs to be created manually in longhorn
+        - name: certs-store
+          hostPath:
+            path: /etc/ssl/certs
+---
+kind: Service 
+apiVersion: v1 
+metadata:
+  name: uptime-kuma-svc
+  namespace: default
+spec:
+  type: ClusterIP 
+  selector:
+    app: uptime-kuma 
+  ports:  # Forwarding port 80 to 3001
+    - port: 80
+      name: http 
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:  # Adjust 'publicEndpoints' accordingly when making changes
+    # This configuration will reject http requests, the redirect ingress below is needed to handle those
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    traefik.ingress.kubernetes.io/router.middlewares: default-hstsxssin@kubernetescrd,default-lan-whitelist@kubernetescrd
+  name: uptime-kuma-in
+  namespace: default
+spec:
+  rules:
+  - host: uptime.local.dudoleitor.com  # Add DNS entry for this domain to the ingress IP (primary or secondary)
+    http:
+      paths:
+      - backend:
+          service:
+            name: uptime-kuma-svc
+            port:
+              number: 80
+        path: /
+        pathType: ImplementationSpecific
+  tls:
+  - hosts:
+    - uptime.local.dudoleitor.com
+    secretName: local-dudoleitor-wildcard  # Needs to be created manually in the namespace 'default'
+---
+# This secondary ingress is needed to properly redirect http requests to https
+# The middleware 'redirect' needs to be deployed in the namespace 'default', check traefik-midd-httpred.yml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: uptime-kuma-in-redirect
+  namespace: default
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web  # <namespace>-<middleware>@kubernetescrd
+    traefik.ingress.kubernetes.io/router.middlewares: default-redirect@kubernetescrd,default-lan-whitelist@kubernetescrd
+spec:
+  rules:
+    - host: uptime.local.dudoleitor.com
+      http:
+        paths:
+          - backend:
+              service:
+                name: uptime-kuma-svc
+                port:
+                  number: 80
+            path: /
+            pathType: ImplementationSpecific

@@ -1,0 +1,12 @@
+# This files describes the primary network interface,
+# the one with the gateway.
+
+auto {{ nic1_name }}
+allow-hotplug {{ nic1_name }}
+iface {{ nic1_name }} inet static
+    address {{ nic1_ip }}/{{ nic1_netmask }}
+    gateway {{ nic1_gateway }}
+    dns-nameservers {{ nic1_dns1 }} {{ nic1_dns2 }}
+{% if nic1_ipv6_token is defined and (not (disable_ipv6 is defined) or not disable_ipv6) %}
+    pre-up /sbin/ip token set {{ nic1_ipv6_token }} dev {{ nic1_name }}
+{% endif %}

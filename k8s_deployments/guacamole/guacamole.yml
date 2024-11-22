@@ -1,0 +1,368 @@
+# This deployment implements guacamole, a SSH RDP VNC gateway.
+#
+# --> Before applying the deployment, an SSL certificate needs to be created in the namespace 'default':
+# - the certificate is mantained through cert-manager, the secret name is 'carlotto-wildcard',
+# be sure that cert-manager is properly configured.
+#
+# --> Before applying the deployment, a secret with the needed credentials has to be
+# created.
+# kubectl create secret generic guacamole-creds
+#  --from-literal=mysql-user=user --from-literal=mysql-pass=pass
+#  --from-literal=mysql-host=ip --from-literal=mysql-port=port
+#
+#  --> Before applying the deployment, the database tables must be initialized properly,
+#  as specified in the guacamole documentation.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: guacamole
+  namespace: default
+spec:
+  replicas: 1
+  strategy: 
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+  revisionHistoryLimit: 0  # Cleaning up all old replicasets
+  selector: 
+    matchLabels: 
+     app: guacamole
+  template:
+    metadata:
+      labels:
+        app: guacamole
+    spec:
+      priorityClassName: lower-priority-1500
+      initContainers:
+        - image: appropriate/curl:latest
+          imagePullPolicy: IfNotPresent
+          name: download
+          args:
+            - "-L"
+            - "--insecure"
+            - "-o"
+            - "/tmp/guacamole-auth-sso-1.5.5.tar.gz"
+            - "https://dlcdn.apache.org/guacamole/1.5.5/binary/guacamole-auth-sso-1.5.5.tar.gz"
+          volumeMounts:
+            - mountPath: /tmp
+              name: init-share
+        - image: busybox:latest
+          imagePullPolicy: IfNotPresent
+          name: extract
+          args: ["sh", "-c", "tar xvf /tmp/guacamole-auth-sso-1.5.5.tar.gz -C /tmp && mv /tmp/guacamole-auth-sso-1.5.5/openid/guacamole-auth-sso-openid-1.5.5.jar /tmp/guacamole-auth-sso-openid-1.5.5.jar && rm -r /tmp/guacamole-auth-sso-1.5.*"]
+          volumeMounts:
+            - mountPath: /tmp
+              name: init-share
+      containers:
+        - image: guacamole/guacamole:1.5.5  # Gateway and actual application
+          imagePullPolicy: IfNotPresent
+          name: guacamole
+          ports:
+            - containerPort: 8080
+              name: guacamole-ui
+              protocol: TCP
+          env:
+          - name: TZ
+            value: 'Europe/Rome'
+          - name: GUACAMOLE_HOME
+            value: '/home/guacamole/homedir'
+          - name: MYSQL_HOSTNAME  # Be sure the IP is allowed in the network policy
+            valueFrom:
+              secretKeyRef:
+                name: guacamole-creds
+                key: mysql-host
+          - name: MYSQL_PORT
+            valueFrom:
+              secretKeyRef:
+                name: guacamole-creds
+                key: mysql-port
+          - name: MYSQL_DATABASE
+            value: 'guacamole'
+          - name: MYSQL_USER
+            valueFrom:
+              secretKeyRef:
+                name: guacamole-creds
+                key: mysql-user
+          - name: MYSQL_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: guacamole-creds
+                key: mysql-pass
+          - name: MYSQL_SERVER_TIMEZONE
+            value: 'Europe/Rome'
+          - name: GUACD_HOSTNAME
+            value: '127.0.0.1'
+          - name: TOTP_ENABLED
+            value: 'false'
+          - name: TOTP_MODE
+            value: 'sha1'
+          - name: EXTENSION_PRIORITY
+            value: 'openid'
+          - name: OPENID_CLIENT_ID
+            value: 'clientid'
+          - name: OPENID_SCOPE
+            value: 'openid profile groups email'
+          - name: OPENID_USERNAME_CLAIM_TYPE
+            value: 'preferred_username'
+          - name: OPENID_GROUPS_CLAIM_TYPE
+            value: 'groups'
+          - name: OPENID_ISSUER
+            value: 'https://auth.carl-otto.it'
+          - name: OPENID_REDIRECT_URI
+            value: 'https://guac.carl-otto.it'
+          - name: OPENID_JWKS_ENDPOINT
+            value: 'http://authelia-svc.authelia.svc/jwks.json'
+          - name: OPENID_AUTHORIZATION_ENDPOINT
+            value: 'https://auth.carl-otto.it/api/oidc/authorization?state=stateid'
+          - name: OPENID_MAX_TOKEN_VALIDITY
+            value: '60'
+          # - name: LOGBACK_LEVEL
+          #   value: 'DEBUG'
+          resources:  # Limiting resources is always better, adjust accordingly
+            limits:
+              cpu: 250m
+              memory: 512Mi
+            requests:
+              cpu: 125m
+              memory: 256Mi
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            # runAsUser: 65200
+            # runAsGroup: 65200
+            capabilities:
+              drop:
+              - ALL
+            # readOnlyRootFilesystem: true
+          readinessProbe:
+            httpGet:
+              port: guacamole-ui
+              path: /guacamole
+            initialDelaySeconds: 30
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              port: guacamole-ui
+              path: /guacamole
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          volumeMounts:
+          - mountPath: /home/guacamole/homedir/logback.xml
+            name: config
+            subPath: logback.xml
+          - mountPath: /home/guacamole/homedir/guacamole.properties
+            name: config
+            subPath: guacamole.properties
+          - mountPath: /home/guacamole/homedir/extensions
+            name: init-share
+          - mountPath: /home/guacamole/homedir/wol-script.sh
+            name: wol-script
+            subPath: wol.sh
+        - image: guacamole/guacd:1.5.5  # Guacd backend
+          imagePullPolicy: IfNotPresent
+          name: guacd
+          ports:
+            - containerPort: 4822
+              name: guacd
+              protocol: TCP
+          resources:  # Limiting resources is always better, adjust accordingly
+            limits:
+              cpu: 250m
+              memory: 512Mi
+            requests:
+              cpu: 125m
+              memory: 256Mi
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            # runAsUser: 65200
+            # runAsGroup: 65200
+            capabilities:
+              drop:
+              - ALL
+            # readOnlyRootFilesystem: true
+      dnsPolicy: ClusterFirst
+      # securityContext:
+      #   fsGroup: 65200
+      #   runAsUser: 65200
+      #   runAsGroup: 65200
+      # restartPolicy: Always
+      schedulerName: default-scheduler
+      terminationGracePeriodSeconds: 10
+      volumes:
+      - name: config
+        configMap:
+          defaultMode: 444
+          name: guacamole-config
+      - name: init-share
+        emptyDir: {}
+      - name: wol-script
+        configMap:
+          defaultMode: 0555
+          name: guacamole-wol-script
+---
+kind: Service 
+apiVersion: v1 
+metadata:
+  name: guacamole
+  namespace: default
+spec:
+  type: ClusterIP 
+  selector:
+    app: guacamole
+  ports:
+    - port: 80
+      targetPort: guacamole-ui
+---
+# The file in this configmap ensures that logs are in a format that can be parsed by crowdsec
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: guacamole-config
+  namespace: default
+data:
+  logback.xml: |-
+    <configuration>
+        <!-- Default appender -->
+        <appender name="GUAC-DEFAULT" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder>
+                <pattern>%date{"yyyy-MM-dd'T'HH:mm:ss,SSSXXX", UTC} [%thread] %-5level %logger{36} - %msg%n</pattern>
+            </encoder>
+        </appender>
+
+        <!-- Log at INFO level -->
+        <root level="WARN">
+            <appender-ref ref="GUAC-DEFAULT" />
+        </root>
+
+    </configuration>
+  guacamole.properties: |
+    enable-environment-properties: true
+
+# This configMap contains a script run each time a connection is initiated to call the wol service
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: guacamole-wol-script
+  namespace: default
+data:
+  wol.sh: |
+    #!/bin/bash
+    # This script is called by guacamole-trigger to wake up a machine
+
+    wol_service="http://go-rest-wol.default.svc.cluster.local/api/wakeup/computer/"
+    host=$1
+    if [ -z "$host" ]; then
+      echo "No IP address provided"
+      exit 1
+    fi
+    curl $wol_service$host >> /tmp/wol.log
+
+# There will be two different ingresses to handle requests coming to the internal traefik ingress and to the
+# external traefik ingress.
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: guacamole-in
+  namespace: default
+  annotations:
+    # This configuration will reject http requests, the redirect ingress below is needed to handle those
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    traefik.ingress.kubernetes.io/router.middlewares: default-hstsxssin@kubernetescrd,default-robotsin@kubernetescrd,default-guacamole-prefixin@kubernetescrd
+spec:
+  rules:
+  - host: guac.carl-otto.it  # Add DNS entry for this domain to the ingress IP (primary or secondary)
+    http:
+      paths:
+      - backend:
+          service:
+            name: guacamole
+            port:
+              number: 80
+        path: /
+        pathType: ImplementationSpecific
+  tls:
+  - secretName: carlotto-wildcard  # Be sure that cert-manager has been configured
+    hosts:
+    - guac.carl-otto.it
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: guacamole-ext
+  namespace: default
+  annotations:
+    # This configuration will reject http requests, the redirect ingress below is needed to handle those
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    traefik.ingress.kubernetes.io/router.middlewares: default-hstsxssext@kubernetescrd,default-robotsext@kubernetescrd,default-guacamole-prefixext@kubernetescrd,kube-system-autheliaext@kubernetescrd
+    kubernetes.io/ingress.class: traefik-external
+  labels:
+    traffic-type: external
+spec:
+  rules:
+  - host: guac.carl-otto.it  # Add DNS entry for this domain to the ingress IP (primary or secondary)
+    http:
+      paths:
+      - backend:
+          service:
+            name: guacamole
+            port:
+              number: 80
+        path: /
+        pathType: ImplementationSpecific
+  tls:
+  - secretName: carlotto-wildcard  # Be sure that cert-manager has been configured
+    hosts:
+    - guac.carl-otto.it
+---
+# This secondary ingress is needed to properly redirect http requests to https
+# The middleware 'redirect' needs to be deployed in the namespace 'default', check traefik-midd-httpred.yml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: guacamole-in-redirect
+  namespace: default
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web  # <namespace>-<middleware>@kubernetescrd
+    traefik.ingress.kubernetes.io/router.middlewares: default-redirect@kubernetescrd
+spec:
+  rules:
+    - host: guac.carl-otto.it
+      http:
+        paths:
+          - backend:
+              service:
+                name: guacamole
+                port:
+                  number: 80
+            path: /
+            pathType: ImplementationSpecific
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: guacamole-prefixin
+  labels:
+    traffic-type: internal
+  annotations:
+    kubernetes.io/ingress.class: traefik-internal
+spec:
+  addPrefix:
+    prefix: /guacamole
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: guacamole-prefixext
+  labels:
+    traffic-type: external
+  annotations:
+    kubernetes.io/ingress.class: traefik-external
+spec:
+  addPrefix:
+    prefix: /guacamole

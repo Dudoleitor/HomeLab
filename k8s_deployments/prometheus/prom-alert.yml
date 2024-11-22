@@ -1,0 +1,112 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus-alertmanager
+  annotations:
+    field.cattle.io/description: Prometheus Alertmanager
+  namespace: monitoring
+spec:
+  replicas: 1
+  strategy: 
+    type: Recreate
+  revisionHistoryLimit: 0  # Cleaning up all old replicasets
+  selector: 
+    matchLabels: 
+     app: prometheus-alertmanager
+  template:
+    metadata:
+      labels:
+        app: prometheus-alertmanager
+    spec:
+      priorityClassName: lower-priority
+      containers:
+      - image: prom/alertmanager:v0.27.0
+        imagePullPolicy: IfNotPresent
+        name: alertmanager
+        args:
+          - "--config.file=/etc/alertmanager/alertmanager.yml"
+          - "--storage.path=/alertmanager"
+        ports:
+        - containerPort: 9093
+          name: alert
+          protocol: TCP
+        volumeMounts:
+        - mountPath: /etc/ssl/certs/ca-certificates.crt
+          name: certs-store
+          subPath: ca-certificates.crt
+          readOnly: true
+        - mountPath: /etc/alertmanager/alertmanager.yml
+          name: conf
+          subPath: alertmanager.yml
+          readOnly: true
+        - mountPath: /alertmanager/
+          name: storage
+        - mountPath: /secrets/
+          name: secrets
+          readOnly: true
+        resources:  # Limiting resources is always better, adjust accordingly
+          limits:
+            cpu: 50m
+            memory: 64Mi
+          requests:
+            cpu: 15m
+            memory: 32Mi
+        securityContext:
+          privileged: false
+          allowPrivilegeEscalation: false
+          runAsUser: 65221
+          runAsGroup: 65221
+          capabilities:
+            drop:
+            - ALL
+        livenessProbe:
+          failureThreshold: 10
+          initialDelaySeconds: 20
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 1
+          tcpSocket:
+            port: alert
+        readinessProbe:
+          failureThreshold: 3
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 1
+          tcpSocket:
+            port: alert
+      dnsPolicy: ClusterFirst
+      securityContext:
+        fsGroup: 65221
+        runAsUser: 65221
+        runAsGroup: 65221
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      terminationGracePeriodSeconds: 10
+      volumes:
+      - name: certs-store
+        hostPath:
+          path: /etc/ssl/certs
+      - name: conf
+        configMap:
+          name: prometheus-alertmanager-conf
+      - name: storage
+        emptyDir: {}
+      - name: secrets
+        secret:
+          secretName: alertmanager
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager
+  namespace: monitoring
+spec:
+  selector: 
+    app: prometheus-alertmanager
+  ports:
+    - port: 9093
+      name: alert
+      targetPort: alert
+      protocol: TCP

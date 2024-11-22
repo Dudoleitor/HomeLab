@@ -1,0 +1,341 @@
+# This deployment implements a lighttpd server for a simple website
+# 
+# --> Before applying the deployment, a persistent volume has to be created:
+# in Longhorn (through the GUI) create a volume 'personal-website' (500Mi rwX) and the relative PVC;
+# since the container runs with user 65200, you need to mount the volume using a temp shell,
+# create two folders data and config and chown 65200:65200.
+# --> Before applying the deployment, SSL certificates need to be created in the namespace 'default':
+# - the certificate is mantained through cert-manager, the secret name is 'carlotto-wildcard',
+# - the certificate is mantained through cert-manager, the secret name is 'dudoleitor-wildcard'
+# be sure that cert-manager is properly configured.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: personal-website
+  annotations:
+    field.cattle.io/description: lighttpd, light web server
+  namespace: default
+spec:
+  replicas: 1
+  strategy: 
+    type: Recreate
+  revisionHistoryLimit: 0  # Cleaning up all old replicasets
+  selector: 
+    matchLabels: 
+     app: lighttpd
+  template:
+    metadata:
+      labels:
+        app: lighttpd
+    spec:
+      containers:
+        - image: sebp/lighttpd  # https://hub.docker.com/r/sebp/lighttpd
+          imagePullPolicy: IfNotPresent
+          name: lighttpd
+          ports:
+            - containerPort: 8080
+              name: lighttpd-http
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /var/www
+              subPath: www
+              name: personal-website  # Needs to be created manually in longhorn
+            - mountPath: /etc/lighttpd
+              subPath: conf
+              name: personal-website  # Needs to be created manually in longhorn
+          # Not limiting resources, using the default of the namespace
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            runAsUser: 65200
+            runAsGroup: 65200
+            capabilities:
+              drop:
+              - ALL
+          readinessProbe:
+            failureThreshold: 1
+            httpGet:
+              path: /ping
+              port: lighttpd-http
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 2
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /ping
+              port: lighttpd-http
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 2
+      dnsPolicy: ClusterFirst
+      securityContext:
+        fsGroup: 65200
+        runAsUser: 65200
+        runAsGroup: 65200
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      terminationGracePeriodSeconds: 30
+      volumes:
+        - name: personal-website
+          persistentVolumeClaim:
+            claimName: personal-website
+# This pod disruption budget ensures that at least 1 pod will be available
+# when draining nodes.
+# ---
+# apiVersion: policy/v1
+# kind: PodDisruptionBudget
+# metadata:
+#   name: lighttpd-pdb
+# spec:
+#   minAvailable: 1
+#   selector:
+#     matchLabels:
+#       app: lighttpd  # Using label 'app' and not the name
+---
+kind: Service 
+apiVersion: v1 
+metadata:
+  name: personal-website-svc
+  namespace: default
+spec:
+  type: ClusterIP
+  selector:
+    app: lighttpd
+    # instance: personal-website
+  ports:
+    - port: 80
+      targetPort: lighttpd-http
+      name: http
+# There will be two different ingresses to handle requests coming to the internal traefik ingress and to th
+# external traefik ingress.
+#
+# Different middlewares will be used for dudoleitor.com as HSTS must not contain the subdomains keyword.
+#
+# A total of 6 ingresses will be created, 3 for each kind:
+# - internal network https ingress
+# - external network https ingress
+# - internal network http redirect ingress
+#
+# carl-otto.it, www.carl-otto.it and www.dudoleitor.com (with standard chain, as HSTS is enabled for every subdomain)
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    # This configuration will reject http requests, the redirect ingress below is needed to handle those
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    traefik.ingress.kubernetes.io/router.middlewares: default-hstsxssin@kubernetescrd
+  name: personal-website-in
+  namespace: default
+spec:
+  rules:
+  - host: carl-otto.it  # Add DNS entry for this domain to the ingress IP (primary or secondary)
+    http:
+      paths:
+      - backend:
+          service:
+            name: personal-website-svc
+            port:
+              number: 80
+        path: /
+        pathType: ImplementationSpecific
+  - host: www.carl-otto.it  # Add DNS entry for this domain to the ingress IP (primary or secondary)
+    http:
+      paths:
+      - backend:
+          service:
+            name: personal-website-svc
+            port:
+              number: 80
+        path: /
+        pathType: ImplementationSpecific
+  - host: www.dudoleitor.com  # Add DNS entry for this domain to the ingress IP (primary or secondary)
+    http:
+      paths:
+      - backend:
+          service:
+            name: personal-website-svc
+            port:
+              number: 80
+        path: /
+        pathType: ImplementationSpecific
+  tls:
+  - secretName: carlotto-wildcard  # Be sure that cert-manager has been configured
+    hosts:
+    - carl-otto.it
+    - www.carl-otto.it
+  - secretName: dudoleitor-wildcard  # Be sure that cert-manager has been configured
+    hosts:
+    - www.dudoleitor.com
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    # This configuration will reject http requests, the redirect ingress below is needed to handle those
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    traefik.ingress.kubernetes.io/router.middlewares: default-hstsxssext@kubernetescrd
+    kubernetes.io/ingress.class: traefik-external
+  labels:
+    traffic-type: external
+  name: personal-website-ext
+  namespace: default
+spec:
+  rules:
+  - host: carl-otto.it  # Add DNS entry for this domain in the cloudflare dashboard
+    http:
+      paths:
+      - backend:
+          service:
+            name: personal-website-svc
+            port:
+              number: 80
+        path: /
+        pathType: ImplementationSpecific
+  - host: www.carl-otto.it  # Add DNS entry for this domain in the cloudflare dashboard
+    http:
+      paths:
+      - backend:
+          service:
+            name: personal-website-svc
+            port:
+              number: 80
+        path: /
+        pathType: ImplementationSpecific
+  - host: www.dudoleitor.com  # Add DNS entry for this domain in the cloudflare dashboard
+    http:
+      paths:
+      - backend:
+          service:
+            name: personal-website-svc
+            port:
+              number: 80
+        path: /
+        pathType: ImplementationSpecific
+  tls:
+  - secretName: carlotto-wildcard  # Be sure that cert-manager has been configured
+    hosts:
+    - carl-otto.it
+    - www.carl-otto.it
+  - secretName: dudoleitor-wildcard  # Be sure that cert-manager has been configured
+    hosts:
+    - www.dudoleitor.com
+---
+# This secondary ingress is needed to properly redirect http requests to https
+# The middleware 'redirect' needs to be deployed in the namespace 'default', check traefik-midd-httpred.yml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: personal-website-in-redirect
+  namespace: default
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web  # <namespace>-<middleware>@kubernetescrd
+    traefik.ingress.kubernetes.io/router.middlewares: default-redirect@kubernetescrd
+spec:
+  rules:
+    - host: carl-otto.it
+      http:
+        paths:
+          - backend:
+              service:
+                name: personal-website-svc
+                port:
+                  number: 80
+            path: /
+            pathType: ImplementationSpecific
+    - host: www.carl-otto.it
+      http:
+        paths:
+          - backend:
+              service:
+                name: personal-website-svc
+                port:
+                  number: 80
+            path: /
+            pathType: ImplementationSpecific
+    - host: dudoleitor.com
+      http:
+        paths:
+          - backend:
+              service:
+                name: personal-website-svc
+                port:
+                  number: 80
+            path: /
+            pathType: ImplementationSpecific
+    - host: www.dudoleitor.com
+      http:
+        paths:
+          - backend:
+              service:
+                name: personal-website-svc
+                port:
+                  number: 80
+            path: /
+            pathType: ImplementationSpecific
+##########
+# dudoleitor.com (without the standard chain, as HSTS must not contain the subdomains keyword)
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    # This configuration will reject http requests, the redirect ingress below is needed to handle those
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    traefik.ingress.kubernetes.io/router.middlewares: default-hstsxss-nosubin@kubernetescrd
+  name: personal-website-dudoleitor-in
+  namespace: default
+spec:
+  rules:
+  - host: dudoleitor.com  # Add DNS entry for this domain to the ingress IP (primary or secondary)
+    http:
+      paths:
+      - backend:
+          service:
+            name: personal-website-svc
+            port:
+              number: 80
+        path: /
+        pathType: ImplementationSpecific
+  tls:
+  - secretName: dudoleitor-wildcard  # Be sure that cert-manager has been configured
+    hosts:
+    - dudoleitor.com
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    # This configuration will reject http requests, the redirect ingress below is needed to handle those
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    traefik.ingress.kubernetes.io/router.middlewares: default-hstsxss-nosubext@kubernetescrd
+    kubernetes.io/ingress.class: traefik-external
+  labels:
+    traffic-type: external
+  name: personal-website-dudoleitor-ext
+  namespace: default
+spec:
+  rules:
+  - host: dudoleitor.com  # Add DNS entry for this domain in the cloudflare dashboard
+    http:
+      paths:
+      - backend:
+          service:
+            name: personal-website-svc
+            port:
+              number: 80
+        path: /
+        pathType: ImplementationSpecific
+  tls:
+  - secretName: dudoleitor-wildcard  # Be sure that cert-manager has been configured
+    hosts:
+    - dudoleitor.com

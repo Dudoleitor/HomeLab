@@ -1,0 +1,286 @@
+# -*- text -*-
+#
+#  $Id: 1741d7e6ed472617f190f90a545272be980a6ff1 $
+
+#
+#  Lightweight Directory Access Protocol (LDAP)
+#
+ldap {
+	#  Note that this needs to match the name(s) in the LDAP server
+	#  certificate, if you're using ldaps.  See OpenLDAP documentation
+	#  for the behavioral semantics of specifying more than one host.
+	#
+	#  Depending on the libldap in use, server may be an LDAP URI.
+	#  In the case of OpenLDAP this allows additional the following
+	#  additional schemes:
+	#  - ldaps:// (LDAP over SSL)
+	#  - ldapi:// (LDAP over Unix socket)
+	#  - ldapc:// (Connectionless LDAP)
+	server = 'localhost'
+
+	#  Administrator account for searching and possibly modifying.
+	#  If using SASL + KRB5 these should be commented out.
+	identity = 'cn=admin,dc=dudoleitor,dc=com'
+	password = admin
+
+	#  dn from which all
+	#  searches will start from.
+	base_dn = 'dc=dudoleitor,dc=com'
+
+	#
+	#  You can run the 'ldapsearch' command line tool using the
+	#  parameters from this module's configuration.
+	#
+	#    ldapsearch -D ${identity} -w ${password} -h ${server}  -b 'CN=user,${base_dn}'
+	#
+	#  That will give you the LDAP information for 'user'.
+	#
+	#  Group membership can be queried by using the above "ldapsearch" string,
+	#  and adding "memberof" qualifiers.  For ActiveDirectory, use:
+	#
+	#    ldapsearch ... '(&(objectClass=user)(sAMAccountName=user)(memberof=CN=group,${base_dn}))'
+	#
+	#  Where 'user' is the user as above, and 'group' is the group you are querying for.
+	#
+
+	#
+	#  Mapping of LDAP directory attributes to RADIUS dictionary attributes.
+	#
+	update {
+		control:Password-With-Header	+= 'userPassword'
+		control:			+= 'radiusControlAttribute'
+		request:			+= 'radiusRequestAttribute'
+		reply:				+= 'radiusReplyAttribute'
+	}
+
+	#
+	#  Name of the attribute that contains the user DN.
+	#  The default name is LDAP-UserDn.
+	#
+	user_dn = "LDAP-UserDn"
+
+	#
+	#  User object identification.
+	#
+	user {
+		#  Where to start searching in the tree for users
+		base_dn = "ou=users,${..base_dn}"
+
+		#  Filter for user objects, should be specific enough
+		#  to identify a single user object.
+		#
+		filter = "(uid=%{%{Stripped-User-Name}:-%{User-Name}})"
+	}
+
+	#
+	#  User membership checking.
+	#
+	group {
+		#  Where to start searching in the tree for groups
+		base_dn = "${..base_dn}"
+
+		#  Filter for group objects, should match all available
+		#  group objects a user might be a member of.
+		filter = '(objectClass=groupOfNames)'
+
+		#  Attribute that uniquely identifies a group.
+		#  Is used when converting group DNs to group
+		#  names.
+		name_attribute = cn
+
+		#  The attribute, in user objects, which contain the names
+		#  or DNs of groups a user is a member of.
+		membership_attribute = 'memberOf'
+	}
+
+	#
+	#  User profiles. RADIUS profile objects contain sets of attributes
+	#  to insert into the request. These attributes are mapped using
+	#  the same mapping scheme applied to user objects (the update section above).
+	#
+	profile {
+	}
+
+	#
+	#  Bulk load clients from the directory
+	#
+	client {
+		#   Where to start searching in the tree for clients
+		base_dn = "${..base_dn}"
+
+		#
+		#  Filter to match client objects
+		#
+		filter = '(objectClass=radiusClient)'
+
+		# Search scope, may be 'base', 'one', 'sub' or 'children'
+#		scope = 'sub'
+
+		#
+		#  Sets default values (not obtained from LDAP) for new client entries
+		#
+		template {
+#			login				= 'test'
+#			password			= 'test'
+#			proto	 			= tcp
+#			require_message_authenticator	= yes
+
+			# Uncomment to add a home_server with the same
+			# attributes as the client.
+#			coa_server {
+#				response_window = 2.0
+#			}
+		}
+
+		#
+		#  Client attribute mappings are in the format:
+		#      <client attribute> = <ldap attribute>
+		#
+		#  The following attributes are required:
+		#    * ipaddr | ipv4addr | ipv6addr - Client IP Address.
+		#    * secret - RADIUS shared secret.
+		#
+		#  All other attributes usually supported in a client
+		#  definition are also supported here.
+		#
+		#  Schemas are available in doc/schemas/ldap for openldap and eDirectory
+		#
+		attribute {
+			ipaddr				= 'radiusClientIdentifier'
+			secret				= 'radiusClientSecret'
+#			shortname			= 'radiusClientShortname'
+#			nas_type			= 'radiusClientType'
+#			virtual_server			= 'radiusClientVirtualServer'
+#			require_message_authenticator	= 'radiusClientRequireMa'
+		}
+	}
+
+	#  Load clients on startup
+#	read_clients = no
+
+	#
+	#  Modify user object on receiving Accounting-Request
+	#
+
+	#  Useful for recording things like the last time the user logged
+	#  in, or the Acct-Session-ID for CoA/DM.
+	#
+	#  LDAP modification items are in the format:
+	# 	<ldap attr> <op> <value>
+	#
+	#  Where:
+	#  	<ldap attr>:	The LDAP attribute to add modify or delete.
+	#  	<op>: 		One of the assignment operators:
+	#			(:=, +=, -=, ++).
+	#			Note: '=' is *not* supported.
+	#  	<value>:	The value to add modify or delete.
+	#
+	#  WARNING: If using the ':=' operator with a multi-valued LDAP
+	#  attribute, all instances of the attribute will be removed and
+	#  replaced with a single attribute.
+	accounting {
+		reference = "%{tolower:type.%{Acct-Status-Type}}"
+
+		type {
+			start {
+				update {
+					description := "Online at %S"
+				}
+			}
+
+			interim-update {
+				update {
+					description := "Last seen at %S"
+				}
+			}
+
+			stop {
+				update {
+					description := "Offline at %S"
+				}
+			}
+		}
+	}
+
+	#
+	#  Post-Auth can modify LDAP objects too
+	#
+	post-auth {
+		update {
+			description := "Authenticated at %S"
+		}
+	}
+
+	#
+	#  LDAP connection-specific options.
+	#
+	#  These options set timeouts, keep-alives, etc. for the connections.
+	#
+	options {
+		#  Control under which situations aliases are followed.
+		#  May be one of 'never', 'searching', 'finding' or 'always'
+		#  default: libldap's default which is usually 'never'.
+		#
+		#  LDAP_OPT_DEREF is set to this value.
+#		dereference = 'always'
+
+		#
+		#  The following two configuration items control whether the
+		#  server follows references returned by LDAP directory.
+		#  They are  mostly for Active Directory compatibility.
+		#  If you set these to 'no', then searches will likely return
+		#  'operations error', instead of a useful result.
+		#
+		chase_referrals = yes
+		rebind = yes
+
+		# SASL Security Properties (see SASL_SECPROPS in ldap.conf man page).
+		# Note - uncomment when using GSS-API sasl mechanism along with TLS
+		# encryption against Active-Directory LDAP servers (this disables
+		# sealing and signing at the GSS level as required by AD).
+		#sasl_secprops = 'noanonymous,noplain,maxssf=0'
+
+		#  Seconds to wait for LDAP query to finish. default: 20
+		res_timeout = 10
+
+		#  Seconds LDAP server has to process the query (server-side
+		#  time limit). default: 20
+		#
+		#  LDAP_OPT_TIMELIMIT is set to this value.
+		srv_timelimit = 3
+
+		#  Seconds to wait for response of the server. (network
+		#  failures) default: 10
+		#
+		#  LDAP_OPT_NETWORK_TIMEOUT is set to this value.
+		net_timeout = 1
+
+		#  LDAP_OPT_X_KEEPALIVE_IDLE
+		idle = 60
+
+		#  LDAP_OPT_X_KEEPALIVE_PROBES
+		probes = 3
+
+		#  LDAP_OPT_X_KEEPALIVE_INTERVAL
+		interval = 3
+
+		#  ldap_debug: debug flag for LDAP SDK
+		#  (see OpenLDAP documentation).  Set this to enable
+		#  huge amounts of LDAP debugging on the screen.
+		#  You should only use this if you are an LDAP expert.
+		#
+		#	default: 0x0000 (no debugging messages)
+		#	Example:(LDAP_DEBUG_FILTER+LDAP_DEBUG_CONNS)
+		ldap_debug = 0x0028
+	}
+	pool {
+		start = ${thread[pool].start_servers}
+		min = ${thread[pool].min_spare_servers}
+		max = ${thread[pool].max_servers}
+		spare = ${thread[pool].max_spare_servers}
+		uses = 0
+		retry_delay = 30
+		lifetime = 0
+		idle_timeout = 60
+	}
+}

@@ -1,0 +1,54 @@
+# This Policy ensures that the pod can access only the resources it's meant to
+# and is hit by traffic coming from the reverse proxy only
+apiVersion: projectcalico.org/v3
+kind: NetworkPolicy
+metadata:
+  name: tiw-project
+  namespace: default
+spec:
+  selector: app == 'tomcat' && instance == 'tiw-project'
+  ingress:
+  - source:  # Allowing connections from the reverse proxy
+      selector: app.kubernetes.io/name == 'traefik'
+      namespaceSelector: kubernetes.io/metadata.name == 'kube-system'
+    destination:
+      ports:
+      - tomcat-http
+    protocol: TCP
+    action: Allow
+  - source:  # Allowing connections from other instances of tomcat
+      selector: app == 'tomcat' && instance == 'tiw-project'
+    destination:
+      ports:
+      - tomcat-cluster
+    protocol: TCP
+    action: Allow
+  egress:
+  - destination:
+      nets:
+      - 10.40.10.19/32  # mysql db
+      ports:
+      - 3305
+    protocol: TCP
+    action: Allow
+  - destination:  # Allowing connections to the dns resolver
+      selector: k8s-app == 'kube-dns'
+      namespaceSelector: kubernetes.io/metadata.name == 'kube-system'
+      ports:
+      - 53
+    protocol: UDP
+    action: Allow
+  - destination:  # Allowing connections to the dns resolver
+      selector: k8s-app == 'kube-dns'
+      namespaceSelector: kubernetes.io/metadata.name == 'kube-system'
+      ports:
+      - 53
+    protocol: TCP
+    action: Allow
+  - destination:  # Allowing connections to other instances of tomcat
+      selector: app == 'tomcat' && instance == 'tiw-project'
+    destination:
+      ports:
+      - tomcat-cluster
+    protocol: TCP
+    action: Allow

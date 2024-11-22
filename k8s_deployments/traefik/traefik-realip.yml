@@ -1,0 +1,19 @@
+# These middleware implements the real-ip plugin, used to retrive the real IP for connection coming from cloudflare
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: realip
+  namespace: kube-system
+  labels:
+    traffic-type: external  # To be detected by the external proxy
+  annotations:
+    kubernetes.io/ingress.class: traefik-external
+spec:
+  plugin:
+    real-ip:
+      Proxy:
+        - proxyHeadername: Cdn-Loop
+          proxyHeadervalue: cloudflare
+          realIP: Cf-Connecting-Ip
+          overwriteXFF: true

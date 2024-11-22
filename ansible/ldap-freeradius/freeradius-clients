@@ -1,0 +1,4 @@
+client testing-client {
+	ipaddr = 127.0.0.1
+	secret = testsecret
+}
